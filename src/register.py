@@ -626,6 +626,9 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
     time.sleep(1.0)
 
     # 等待 Turnstile
+    # 先点击 Cookie 同意按钮（如果存在）
+    _accept_all_cookies(page)
+    
     print("🛡️ 等待 Turnstile 验证...", flush=True)
     wait_for_turnstile(page, timeout=timeout, cancel_callback=cancel_callback)
 
@@ -1123,6 +1126,36 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True,
         # 保存账号
         if save_to_file:
             from .account_store import append_account
+
+def _accept_all_cookies(page):
+    """自动点击 OneTrust Cookie 同意按钮（如果存在）。"""
+    try:
+        # 尝试点击"接受所有 Cookie"按钮
+        buttons = [
+            "#onetrust-accept-btn-handler",
+            "#onetrust-reject-all-sticky",
+            "[id*='onetrust']",
+            ".ot-sdk-btn-consent",
+        ]
+        
+        for selector in buttons:
+            try:
+                page.wait_for_selector(selector, timeout=2000)
+                element = page.query_selector(selector)
+                if element:
+                    print(f"✅ 已点击 Cookie 同意按钮：{selector}", flush=True)
+                    element.click(timeout=3000)
+                    return True
+            except Exception:
+                continue
+        
+        # 如果没有找到，返回 None 表示无需处理
+        return None
+    except Exception as e:
+        print(f"⚠️ Cookie 同意检查失败（忽略）: {e}", flush=True)
+        return None
+
+
             import os, time as _t
             ts = _t.strftime("%Y%m%d")
             out_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"accounts_{ts}.txt")
