@@ -392,8 +392,7 @@ class Grok4FreeGUI:
         # 查找最新的账号记录文件
         files = glob.glob("accounts_*.txt")
         if not files:
-            messagebox.showinfo("提示", "尚未找到任何账号记录文件。
-请完成注册后查看。")
+            messagebox.showinfo("提示", "尚未找到任何账号记录文件。\n请完成注册后查看。")
             return
         
         # 按修改时间排序，获取最新的文件
