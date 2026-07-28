@@ -43,36 +43,54 @@ Grok4Free 是一个完全独立的 Grok 账号自动注册工具，实现了从*
 
 ## 🚀 快速开始
 
-### 1️⃣ 环境准备
+### ⚡ 一键启动（推荐新手）
 
+#### Linux / macOS
 ```bash
-cd /home/danny/projects/Grok4Free
-
-# 安装依赖（会自动下载 GeoIP 数据库，约数百 MB）
-pip install -r requirements.txt
+chmod +x start-gui.sh
+./start-gui.sh
 ```
 
-**系统要求：**
-- Python 3.10+
-- Linux (推荐) / macOS / Windows
-- Firefox 浏览器（由 Camoufox 自动管理）
+#### Windows
+双击 `start-gui.bat` 或右键 → "以管理员身份运行"
 
-### 2️⃣ 配置项目
+**脚本自动完成：**
+- ✅ 检查 Python 3.10+
+- ✅ 创建虚拟环境
+- ✅ 安装依赖（camoufox + curl_cffi）
+- ✅ 生成配置文件
 
-复制配置模板并编辑：
+<details>
+<summary>💡 遇到问题？查看详细部署指南</summary>
+
+查看 [README_DEPLOY.md](README_DEPLOY.md) 了解：
+- 完整部署流程
+- 常见问题解决方案
+- 手动部署方法
+- 故障排除技巧
+
+</details>
+
+---
+
+### ⚙️ 配置邮箱（重要！）
+
+首次运行会自动生成 `config.json`，请编辑配置：
 
 ```bash
-cp config.example.json config.json
+nano config.json  # Linux / macOS
+notepad config.json  # Windows
 ```
 
-**关键配置项说明：**
-
+**关键配置项：**
 | 配置项 | 作用 | 必填场景 |
 |--------|------|----------|
 | `mail_mode` | 邮箱模式选择 | 必须设置 |
 | `moemail_api_base` | MoEmail 服务地址 | moemail 模式 |
 | `moemail_api_key` | MoEmail API Key | moemail 模式 |
 | `proxy` / `proxies` | 代理服务器配置 | 推荐配置 |
+
+详细配置说明请参考下方 **三种邮箱模式详解**。
 
 #### 三种邮箱模式详解：
 
