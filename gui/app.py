@@ -115,6 +115,9 @@ class Grok4FreeGUI:
         
         ttk.Button(btn_row, text="清空日志", command=self._clear_log, width=12).pack(side=tk.LEFT)
         
+        # 新增：打开账号记录文件按钮
+        ttk.Button(btn_row, text="查看账号记录", command=self._open_accounts_file, width=16).pack(side=tk.LEFT)
+        
         # 统计栏
         self.stats_var = tk.StringVar(value="就绪")
         ttk.Label(control_frame, textvariable=self.stats_var, font=("Arial", 10, "bold"),
@@ -380,6 +383,36 @@ class Grok4FreeGUI:
         self.fail_count = 0
         self.ui_queue.put(("stats", 0, 0, 0))
         self._log("[*] 日志已清空")
+    
+    def _open_accounts_file(self):
+        """打开账号记录文件。"""
+        import glob
+        import os
+        
+        # 查找最新的账号记录文件
+        files = glob.glob("accounts_*.txt")
+        if not files:
+            messagebox.showinfo("提示", "尚未找到任何账号记录文件。
+请完成注册后查看。")
+            return
+        
+        # 按修改时间排序，获取最新的文件
+        latest_file = max(files, key=os.path.getmtime)
+        
+        try:
+            # 使用系统默认文本编辑器打开
+            if sys.platform.startswith('win'):
+                os.startfile(latest_file)
+            elif sys.platform.startswith('darwin'):
+                os.system(f'open "{latest_file}"')
+            else:
+                # Linux - 尝试使用 xdg-open
+                os.system(f'xdg-open "{latest_file}"')
+            
+            self._log(f"[*] 已打开账号记录：{latest_file}")
+        except Exception as e:
+            self._log(f"[×] 打开文件失败：{e}")
+            messagebox.showerror("错误", f"无法打开文件：{e}")
     
     def _start_registration(self):
         """启动注册流程。"""
