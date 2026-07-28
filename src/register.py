@@ -312,6 +312,35 @@ def human_type_otp(page, selector: str, text: str, state: dict, label="验证码
         return False
 
 
+def _accept_all_cookies(page):
+    """自动点击 OneTrust Cookie 同意按钮（如果存在）。"""
+    try:
+        # 尝试点击"接受所有 Cookie"按钮
+        buttons = [
+            "#onetrust-accept-btn-handler",
+            "#onetrust-reject-all-sticky",
+            "[id*='onetrust']",
+            ".ot-sdk-btn-consent",
+        ]
+
+        for selector in buttons:
+            try:
+                page.wait_for_selector(selector, timeout=2000)
+                element = page.query_selector(selector)
+                if element:
+                    print(f"✅ 已点击 Cookie 同意按钮：{selector}", flush=True)
+                    element.click(timeout=3000)
+                    return True
+            except Exception:
+                continue
+
+        # 如果没有找到，返回 None 表示无需处理
+        return None
+    except Exception as e:
+        print(f"⚠️ Cookie 同意检查失败（忽略）: {e}", flush=True)
+        return None
+
+
 def _get_turnstile_token(page):
     """读取 Turnstile 的 response token，没有则返回空串。"""
     try:
@@ -854,6 +883,9 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True,
     print(f"✅ 当前 URL: {page.url}", flush=True)
     time.sleep(0.8)
 
+    # 处理 OneTrust Cookie 同意弹窗（一开始就可能弹出，会遮挡注册按钮）
+    _accept_all_cookies(page)
+
     # ---- 步骤 2：点击「使用邮箱注册」 ----
     _check_cancel(cancel_callback)
     try:
@@ -1126,36 +1158,6 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True,
         # 保存账号
         if save_to_file:
             from .account_store import append_account
-
-def _accept_all_cookies(page):
-    """自动点击 OneTrust Cookie 同意按钮（如果存在）。"""
-    try:
-        # 尝试点击"接受所有 Cookie"按钮
-        buttons = [
-            "#onetrust-accept-btn-handler",
-            "#onetrust-reject-all-sticky",
-            "[id*='onetrust']",
-            ".ot-sdk-btn-consent",
-        ]
-        
-        for selector in buttons:
-            try:
-                page.wait_for_selector(selector, timeout=2000)
-                element = page.query_selector(selector)
-                if element:
-                    print(f"✅ 已点击 Cookie 同意按钮：{selector}", flush=True)
-                    element.click(timeout=3000)
-                    return True
-            except Exception:
-                continue
-        
-        # 如果没有找到，返回 None 表示无需处理
-        return None
-    except Exception as e:
-        print(f"⚠️ Cookie 同意检查失败（忽略）: {e}", flush=True)
-        return None
-
-
             import os, time as _t
             ts = _t.strftime("%Y%m%d")
             out_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"accounts_{ts}.txt")
