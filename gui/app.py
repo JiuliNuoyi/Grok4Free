@@ -21,7 +21,8 @@ import os
 # 导入后端模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import load_config, save_config, get_moemail_api_base, get_moemail_api_key, \
-                         get_moemail_domain, get_proxy, get_proxies
+                         get_moemail_domain, get_proxy, get_proxies, get_mail_mode, \
+                         get_msgraph_accounts, get_submailbox_accounts
 from src.scheduler import RegistrationScheduler
 
 
@@ -118,24 +119,97 @@ class Grok4FreeGUI:
     
     def _create_config_widgets(self, parent):
         """创建配置控件。"""
+        # 邮箱模式选择（MoEmail / MS Graph 正常微软邮箱 / 子邮箱）
+        ttk.Label(parent, text="邮箱模式:").pack(anchor=tk.W, pady=(10, 0))
+        _mode = get_mail_mode(self.cfg)
+        self._mode_label_to_key = {
+            "MoEmail（自动创建临时邮箱）": "moemail",
+            "MS Graph（自备微软邮箱）": "msgraph",
+            "子邮箱（微软主邮箱生成）": "submailbox",
+        }
+        self._mode_key_to_label = {v: k for k, v in self._mode_label_to_key.items()}
+        self.mail_mode_var = tk.StringVar(value=self._mode_key_to_label.get(_mode, "MoEmail（自动创建临时邮箱）"))
+        mode_combo = ttk.Combobox(
+            parent, textvariable=self.mail_mode_var, state="readonly", width=28,
+            values=list(self._mode_label_to_key.keys()),
+        )
+        mode_combo.pack(fill=tk.X, pady=(0, 10))
+        mode_combo.bind("<<ComboboxSelected>>", lambda e: self._on_mode_change())
+
+        # 模式专属配置容器（固定在代理区之上，内部按模式显隐子 frame）
+        self.mode_container = ttk.Frame(parent)
+        self.mode_container.pack(fill=tk.X)
+
+        # ===== MoEmail 配置区（可显隐）=====
+        self.moemail_frame = ttk.Frame(self.mode_container)
+        mp = self.moemail_frame
+
         # MoEmail API Base
-        ttk.Label(parent, text="API Base:").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(mp, text="API Base:").pack(anchor=tk.W, pady=(0, 0))
         self.api_base_var = tk.StringVar(value=get_moemail_api_base(self.cfg))
-        api_base_entry = ttk.Entry(parent, textvariable=self.api_base_var, width=30)
+        api_base_entry = ttk.Entry(mp, textvariable=self.api_base_var, width=30)
         api_base_entry.pack(fill=tk.X, pady=(0, 15))
         
         # MoEmail API Key
-        ttk.Label(parent, text="API Key:").pack(anchor=tk.W)
+        ttk.Label(mp, text="API Key:").pack(anchor=tk.W)
         self.api_key_var = tk.StringVar(value=get_moemail_api_key(self.cfg))
-        api_key_entry = ttk.Entry(parent, textvariable=self.api_key_var, show="*", width=30)
+        api_key_entry = ttk.Entry(mp, textvariable=self.api_key_var, show="*", width=30)
         api_key_entry.pack(fill=tk.X, pady=(0, 15))
         
         # MoEmail Domain
-        ttk.Label(parent, text="Domain (@符号可省略):").pack(anchor=tk.W, pady=(10, 0))
+        ttk.Label(mp, text="Domain (@符号可省略):").pack(anchor=tk.W, pady=(10, 0))
         self.domain_var = tk.StringVar(value=get_moemail_domain(self.cfg))
-        domain_entry = ttk.Entry(parent, textvariable=self.domain_var, width=30)
+        domain_entry = ttk.Entry(mp, textvariable=self.domain_var, width=30)
         domain_entry.pack(fill=tk.X, pady=(0, 15))
-        
+
+        # 注册数量（仅 MoEmail 模式有意义，放在 MoEmail 区内）
+        ttk.Label(mp, text="注册数量:").pack(anchor=tk.W, pady=(10, 0))
+        count_val = self.cfg.get("register_count", 1)
+        self.count_var = tk.StringVar(value=str(max(count_val, 1)))
+        count_entry = ttk.Spinbox(mp, from_=1, to=99, textvariable=self.count_var, width=12)
+        count_entry.pack(pady=(0, 15))
+
+        # ===== MS Graph 配置区（可显隐）=====
+        self.msgraph_frame = ttk.Frame(self.mode_container)
+        gp = self.msgraph_frame
+        gp_head = ttk.Frame(gp)
+        gp_head.pack(fill=tk.X, pady=(0, 0))
+        ttk.Label(gp_head, text="微软邮箱账号 (一行一个):").pack(side=tk.LEFT)
+        ttk.Button(gp_head, text="清除", width=6,
+                   command=lambda: self._clear_accounts(self.msgraph_text, "微软邮箱")
+                   ).pack(side=tk.RIGHT)
+        self.msgraph_text = tk.Text(gp, width=30, height=8, font=("Consolas", 9), wrap=tk.NONE)
+        self.msgraph_text.pack(fill=tk.X, pady=(0, 2))
+        _init_accts = get_msgraph_accounts(self.cfg)
+        if _init_accts:
+            self.msgraph_text.insert("1.0", "\n".join(_init_accts))
+        ttk.Label(gp, text="格式: 邮箱----密码----refresh_token----client_id",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 1))
+        ttk.Label(gp, text="有几个邮箱就注册几个（数量=行数）",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 15))
+
+        # ===== 子邮箱配置区（可显隐）=====
+        self.submailbox_frame = ttk.Frame(self.mode_container)
+        sp = self.submailbox_frame
+        sp_head = ttk.Frame(sp)
+        sp_head.pack(fill=tk.X, pady=(0, 0))
+        ttk.Label(sp_head, text="子邮箱账号 (一行一个):").pack(side=tk.LEFT)
+        ttk.Button(sp_head, text="清除", width=6,
+                   command=lambda: self._clear_accounts(self.submailbox_text, "子邮箱")
+                   ).pack(side=tk.RIGHT)
+        self.submailbox_text = tk.Text(sp, width=30, height=8, font=("Consolas", 9), wrap=tk.NONE)
+        self.submailbox_text.pack(fill=tk.X, pady=(0, 2))
+        _init_sub = get_submailbox_accounts(self.cfg)
+        if _init_sub:
+            self.submailbox_text.insert("1.0", "\n".join(_init_sub))
+        ttk.Label(sp, text="格式: 邮箱----密码----令牌----client_id",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 1))
+        ttk.Label(sp, text="微软主邮箱生成，共享收件系统，按收件地址取件",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 1))
+        ttk.Label(sp, text="有几个子邮箱就注册几个（数量=行数）",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 15))
+
+        # ===== 通用配置区（代理 + 并发，始终显示）=====
         # Proxy（多行，一行一个；每个进程分配不同代理以规避风控）
         ttk.Label(parent, text="代理 (可留空，一行一个):").pack(anchor=tk.W, pady=(10, 0))
         self.proxy_text = tk.Text(parent, width=30, height=5, font=("Consolas", 9), wrap=tk.NONE)
@@ -148,13 +222,6 @@ class Grok4FreeGUI:
                   font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 1))
         ttk.Label(parent, text="多个代理时每进程分配不同代理，规避风控",
                   font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 15))
-        
-        # Register Count
-        ttk.Label(parent, text="注册数量:").pack(anchor=tk.W, pady=(10, 0))
-        count_val = self.cfg.get("register_count", 1)
-        self.count_var = tk.StringVar(value=str(max(count_val, 1)))
-        count_entry = ttk.Spinbox(parent, from_=1, to=99, textvariable=self.count_var, width=12)
-        count_entry.pack(pady=(0, 15))
 
         # Concurrency（并发数，1-5）
         ttk.Label(parent, text="并发数 (1-5):").pack(anchor=tk.W, pady=(10, 0))
@@ -173,6 +240,57 @@ class Grok4FreeGUI:
         
         # Save Button
         ttk.Button(parent, text="保存配置", command=self._save_config).pack(pady=(0, 10))
+
+        # 根据当前模式显隐对应配置区
+        self._on_mode_change()
+
+    def _current_mail_mode(self):
+        """返回当前选中的邮箱模式 key（moemail / msgraph）。"""
+        return self._mode_label_to_key.get(self.mail_mode_var.get(), "moemail")
+
+    def _on_mode_change(self):
+        """切换邮箱模式时显隐对应的配置区。"""
+        mode = self._current_mail_mode()
+        self.moemail_frame.pack_forget()
+        self.msgraph_frame.pack_forget()
+        self.submailbox_frame.pack_forget()
+        if mode == "msgraph":
+            self.msgraph_frame.pack(fill=tk.X)
+        elif mode == "submailbox":
+            self.submailbox_frame.pack(fill=tk.X)
+        else:
+            self.moemail_frame.pack(fill=tk.X)
+
+    def _read_msgraph_accounts(self):
+        """从多行文本框读取正常微软邮箱账号（去空、去重、保持顺序）。"""
+        return self._read_text_lines(self.msgraph_text)
+
+    def _read_submailbox_accounts(self):
+        """从多行文本框读取子邮箱账号（去空、去重、保持顺序）。"""
+        return self._read_text_lines(self.submailbox_text)
+
+    def _read_text_lines(self, text_widget):
+        raw = text_widget.get("1.0", tk.END)
+        seen = set()
+        result = []
+        for line in raw.replace("\r", "\n").split("\n"):
+            item = line.strip()
+            if item and item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
+    def _clear_accounts(self, text_widget, label):
+        """一键清除邮箱账号输入框（需确认）。"""
+        content = text_widget.get("1.0", tk.END).strip()
+        if not content:
+            self._log(f"[*] {label}账号输入框已是空的")
+            return
+        if not messagebox.askyesno("确认清除", f"确定清空所有{label}账号吗？此操作不可撤销。"):
+            return
+        text_widget.delete("1.0", tk.END)
+        self._log(f"[*] 已清除{label}账号输入框")
+
     
     def _log(self, message):
         """向日志框写入消息（线程安全）。"""
@@ -233,6 +351,9 @@ class Grok4FreeGUI:
             cfg["moemail_api_base"] = self.api_base_var.get().strip().rstrip("/")
             cfg["moemail_api_key"] = self.api_key_var.get().strip()
             cfg["moemail_domain"] = self.domain_var.get().strip().lstrip("@")
+            cfg["mail_mode"] = self._current_mail_mode()
+            cfg["msgraph_accounts"] = self._read_msgraph_accounts()
+            cfg["submailbox_accounts"] = self._read_submailbox_accounts()
             proxies = self._read_proxies()
             cfg["proxies"] = proxies
             cfg["proxy"] = proxies[0] if proxies else ""  # 兼容单代理字段
@@ -259,14 +380,34 @@ class Grok4FreeGUI:
     
     def _start_registration(self):
         """启动注册流程。"""
-        # 验证配置
-        api_base = self.api_base_var.get().strip()
-        api_key = self.api_key_var.get().strip()
-        domain = self.domain_var.get().strip()
-        
-        if not api_base or not api_key or not domain:
-            messagebox.showerror("错误", "请完善 MoEmail 配置（API Base / API Key / Domain）")
-            return
+        mode = self._current_mail_mode()
+        if mode in ("msgraph", "submailbox"):
+            # 校验微软邮箱 / 子邮箱账号
+            from src.mail_msgraph import parse_account_lines
+            if mode == "submailbox":
+                accounts_raw = self._read_submailbox_accounts()
+                empty_msg = "请填写至少一个子邮箱账号"
+                bad_msg = "子邮箱账号格式有误"
+            else:
+                accounts_raw = self._read_msgraph_accounts()
+                empty_msg = "请填写至少一个微软邮箱账号"
+                bad_msg = "微软邮箱账号格式有误"
+            if not accounts_raw:
+                messagebox.showerror("错误", empty_msg)
+                return
+            try:
+                parse_account_lines("\n".join(accounts_raw))
+            except Exception as e:
+                messagebox.showerror("错误", f"{bad_msg}：{e}")
+                return
+        else:
+            # 验证 MoEmail 配置
+            api_base = self.api_base_var.get().strip()
+            api_key = self.api_key_var.get().strip()
+            domain = self.domain_var.get().strip()
+            if not api_base or not api_key or not domain:
+                messagebox.showerror("错误", "请完善 MoEmail 配置（API Base / API Key / Domain）")
+                return
         
         self.stop_requested = False
         self._update_buttons(running=True)
@@ -315,9 +456,30 @@ class Grok4FreeGUI:
             cfg["register_count"] = count
             concurrency = self._read_concurrency()
             cfg["concurrency"] = concurrency
+
+            mode = self._current_mail_mode()
+            cfg["mail_mode"] = mode
+            graph_accounts = None
+            if mode in ("msgraph", "submailbox"):
+                from src.mail_msgraph import parse_account_lines
+                if mode == "submailbox":
+                    accounts_raw = self._read_submailbox_accounts()
+                    cfg["submailbox_accounts"] = accounts_raw
+                else:
+                    accounts_raw = self._read_msgraph_accounts()
+                    cfg["msgraph_accounts"] = accounts_raw
+                graph_accounts = parse_account_lines("\n".join(accounts_raw))
+                count = len(graph_accounts)  # 数量=邮箱数
+                cfg["register_count"] = count
+
             save_config(cfg)
 
-            self._log(f"[*] 总数 {count}，并发 {concurrency}（错峰启动）")
+            if mode == "submailbox":
+                self._log(f"[*] 子邮箱模式：{count} 个子邮箱，并发 {concurrency}（错峰启动）")
+            elif mode == "msgraph":
+                self._log(f"[*] MS Graph 模式：{count} 个微软邮箱，并发 {concurrency}（错峰启动）")
+            else:
+                self._log(f"[*] MoEmail 模式：总数 {count}，并发 {concurrency}（错峰启动）")
 
             # 统计
             last_stats = {"success": 0, "fail": 0}
@@ -347,6 +509,8 @@ class Grok4FreeGUI:
                 headless=False,  # 有头模式
                 log_callback=log_callback,
                 result_callback=result_callback,
+                mail_mode=mode,
+                graph_accounts=graph_accounts,
             )
             self._scheduler.run()
 

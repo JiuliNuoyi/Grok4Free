@@ -63,7 +63,8 @@ def _make_cancel_callback(stop_event):
 
 
 def run_worker(worker_id, config_dict, log_queue, result_queue, stop_event,
-               headless=False, proxy_override=None):
+               headless=False, proxy_override=None,
+               mail_mode="moemail", graph_account=None):
     """单个注册任务的子进程入口。
 
     Args:
@@ -75,6 +76,10 @@ def run_worker(worker_id, config_dict, log_queue, result_queue, stop_event,
         headless:       是否无头
         proxy_override: 调度器分配给本进程的代理字符串（多代理模式）。
                         为 None 时回退读取 config.json 的单个代理。
+        mail_mode:      "moemail"（自动创建临时邮箱）/ "msgraph"（正常微软邮箱）/
+                        "submailbox"（子邮箱）。
+        graph_account:  mail_mode 为 msgraph/submailbox 时的邮箱账号
+                        {"email","password","refresh_token","client_id"}。
     """
     # 所有 worker 共用同一份 config.json（相同 moemail）。代理由调度器
     # 通过 proxy_override 单独分配给每个进程，从而实现"一进程一代理"规避风控。
@@ -128,6 +133,7 @@ def run_worker(worker_id, config_dict, log_queue, result_queue, stop_event,
                     result = run_live(
                         page, state, proxy=raw_proxy,
                         cancel_callback=cancel_cb, save_to_file=False,
+                        mail_mode=mail_mode, graph_account=graph_account,
                     )
             except CancelledError:
                 print("\n[!] 已停止当前注册（浏览器已关闭）", flush=True)

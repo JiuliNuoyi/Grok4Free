@@ -22,6 +22,9 @@ DEFAULT_CONFIG = {
     "proxies": [],
     "register_count": 1,
     "concurrency": 1,
+    "mail_mode": "moemail",       # "moemail" / "msgraph"（正常微软邮箱）/ "submailbox"（子邮箱）
+    "msgraph_accounts": [],       # 微软邮箱账号列表，每项为 "邮箱----密码----refresh_token----client_id"
+    "submailbox_accounts": [],    # 子邮箱账号列表，格式同上（收件系统共享，按收件地址过滤）
 }
 
 
@@ -115,3 +118,41 @@ def get_concurrency(config):
         return max(1, min(int(config.get("concurrency", 1) or 1), 5))
     except (TypeError, ValueError):
         return 1
+
+
+def get_mail_mode(config):
+    """返回邮箱模式：'moemail' / 'msgraph' / 'submailbox'（默认 moemail）。"""
+    mode = str(config.get("mail_mode", "moemail") or "moemail").strip().lower()
+    if mode in ("msgraph", "submailbox"):
+        return mode
+    return "moemail"
+
+
+def _clean_lines(raw):
+    """把 list 或换行字符串清洗成去空去重列表（保持顺序）。"""
+    items = []
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw]
+    elif isinstance(raw, str):
+        items = [ln.strip() for ln in raw.replace("\r", "\n").split("\n")]
+    seen = set()
+    result = []
+    for it in items:
+        if it and it not in seen:
+            seen.add(it)
+            result.append(it)
+    return result
+
+
+def get_msgraph_accounts(config):
+    """返回正常微软邮箱账号原始行列表（去空、去重、保持顺序）。
+
+    支持 list 或换行分隔字符串。每项形如
+    '邮箱----密码----refresh_token----client_id'（此函数不解析字段，只做清洗）。
+    """
+    return _clean_lines(config.get("msgraph_accounts", None))
+
+
+def get_submailbox_accounts(config):
+    """返回子邮箱账号原始行列表（去空、去重、保持顺序），格式同 msgraph。"""
+    return _clean_lines(config.get("submailbox_accounts", None))

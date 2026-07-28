@@ -25,7 +25,8 @@ class RegistrationScheduler:
 
     def __init__(self, config_dict, total, concurrency, headless=False,
                  log_callback=None, result_callback=None,
-                 stagger_min=0.5, stagger_max=2.0):  # 加速：从 2-5s → 0.5-2s
+                 stagger_min=0.5, stagger_max=2.0,  # 加速：从 2-5s → 0.5-2s
+                 mail_mode="moemail", graph_accounts=None):
         """
         Args:
             config_dict:     配置字典
@@ -35,9 +36,19 @@ class RegistrationScheduler:
             log_callback:    log_callback(worker_id, line) 转发日志到 GUI
             result_callback: result_callback(worker_id, result) 每个任务完成时回调
             stagger_min/max: 错峰启动的随机间隔范围（秒）
+            mail_mode:       "moemail" / "msgraph"（正常微软邮箱）/ "submailbox"（子邮箱）
+            graph_accounts:  mail_mode 为 msgraph/submailbox 时的邮箱账号列表，每项为
+                             {"email","password","refresh_token","client_id"}。
+                             此时 total 会被强制对齐为账号数量。
         """
         self.config_dict = config_dict
-        self.total = max(int(total), 1)
+        self.mail_mode = mail_mode
+        self.graph_accounts = list(graph_accounts or [])
+        # 微软邮箱两种模式：任务数由邮箱数量决定（几个邮箱注册几个）
+        if self.mail_mode in ("msgraph", "submailbox"):
+            self.total = len(self.graph_accounts)
+        else:
+            self.total = max(int(total), 1)
         self.concurrency = max(1, min(int(concurrency), 5))
         self.headless = headless
         self.log_callback = log_callback
@@ -134,6 +145,12 @@ class RegistrationScheduler:
         active = {}               # worker_id -> Process
 
         self._log(0, f"[主进程] 🚀 开始批量注册：总数 {self.total}，并发 {self.concurrency}")
+        if self.mail_mode == "submailbox":
+            self._log(0, f"[主进程] 📧 邮箱模式：子邮箱（共享收件系统，按收件地址过滤），共 {len(self.graph_accounts)} 个")
+        elif self.mail_mode == "msgraph":
+            self._log(0, f"[主进程] 📧 邮箱模式：MS Graph（微软邮箱），共 {len(self.graph_accounts)} 个邮箱")
+        else:
+            self._log(0, "[主进程] 📧 邮箱模式：MoEmail（自动创建临时邮箱）")
         if self.proxy_pool:
             n = len(self.proxy_pool)
             if n >= self.concurrency:
@@ -157,11 +174,17 @@ class RegistrationScheduler:
                 next_id += 1
                 launched += 1
                 assigned_proxy = self._assign_proxy()
+                # 微软邮箱模式：按任务序号分配一个邮箱账号（wid 从 1 开始）
+                graph_account = None
+                if self.mail_mode in ("msgraph", "submailbox"):
+                    idx = wid - 1
+                    if 0 <= idx < len(self.graph_accounts):
+                        graph_account = self.graph_accounts[idx]
                 p = self._ctx.Process(
                     target=run_worker,
                     args=(wid, self.config_dict, self.log_queue,
                           self.result_queue, self.stop_event, self.headless,
-                          assigned_proxy),
+                          assigned_proxy, self.mail_mode, graph_account),
                     daemon=True,
                 )
                 p.start()
@@ -176,7 +199,10 @@ class RegistrationScheduler:
                         proxy_note = f"，代理 {_h.hostname}:{_h.port}" if _h.hostname else ""
                     except Exception:
                         proxy_note = ""
-                self._log(0, f"[主进程] ▶️ 启动任务 #{wid}（活跃 {len(active)}/{self.concurrency}）{proxy_note}")
+                mail_note = ""
+                if graph_account:
+                    mail_note = f"，邮箱 {graph_account.get('email', '')}"
+                self._log(0, f"[主进程] ▶️ 启动任务 #{wid}（活跃 {len(active)}/{self.concurrency}）{proxy_note}{mail_note}")
 
                 # 错峰：启动下一个前随机等待（仍要转发日志）
                 if len(active) < self.concurrency and launched < self.total:

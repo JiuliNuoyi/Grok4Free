@@ -9,5 +9,14 @@
         "http://user:pass@ip2:port"
     ],
     "register_count": 1,
-    "concurrency": 1
+    "concurrency": 1,
+    "mail_mode": "moemail",
+    "msgraph_accounts": [
+        "user1@outlook.com----邮箱密码----refresh_token----client_id",
+        "user2@outlook.com----邮箱密码----refresh_token----client_id"
+    ],
+    "submailbox_accounts": [
+        "sub1@xxx.com----邮箱密码----令牌----client_id",
+        "sub2@xxx.com----邮箱密码----令牌----client_id"
+    ]
 }

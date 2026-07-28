@@ -87,7 +87,7 @@ def create_email():
 
 
 def fetch_verification_code(email, email_id, timeout=180, log_callback=None, cancel_callback=None):
-    """轮询邮箱获取验证码。"""
+    """轮询 MoEmail 邮箱获取验证码。"""
     from .config import load_config
     from .mail_moemail import poll_verification_code, extract_verification_code
     
@@ -107,6 +107,38 @@ def fetch_verification_code(email, email_id, timeout=180, log_callback=None, can
         log_callback=lambda m: print("   " + m, flush=True),
         resend_callback=None,
         cancel_callback=cancel_callback,
+    )
+    return code
+
+
+def fetch_verification_code_graph(graph_account, timeout=180, cancel_callback=None,
+                                  submailbox=False):
+    """轮询微软邮箱（MS Graph）获取验证码。
+
+    Args:
+        graph_account: {"email","password","refresh_token","client_id"}
+        submailbox:    True 表示子邮箱模式：换 token 固定走 GRAPH scope，
+                       且只提取收件人为本子邮箱地址的邮件（防止共享收件系统串号）。
+    """
+    from .mail_msgraph import poll_verification_code as _poll_graph, SCOPE_GRAPH
+
+    email = graph_account.get("email", "")
+    if submailbox:
+        print(f"[*] 正在为子邮箱 {email} 拉取验证码（最多等 {timeout} 秒）...", flush=True)
+    else:
+        print(f"[*] 正在为微软邮箱 {email} 拉取验证码（最多等 {timeout} 秒）...", flush=True)
+
+    code = _poll_graph(
+        client_id=graph_account["client_id"],
+        refresh_token=graph_account["refresh_token"],
+        tenant=graph_account.get("tenant", "consumers"),
+        timeout=timeout,
+        poll_interval=3,
+        log_callback=lambda m: print("   " + m, flush=True),
+        resend_callback=None,
+        cancel_callback=cancel_callback,
+        target_address=email if submailbox else None,
+        force_scope=SCOPE_GRAPH if submailbox else None,
     )
     return code
 
@@ -771,24 +803,44 @@ def _cancellable_sleep(seconds, cancel_callback):
         time.sleep(min(0.2, max(deadline - time.time(), 0)))
 
 
-def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
-    """完整注册流程：创建邮箱 → 填邮箱 → 验证码 → 资料 → Turnstile → 完成注册 → OAuth → token。
+def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True,
+             mail_mode="moemail", graph_account=None):
+    """完整注册流程：创建/使用邮箱 → 填邮箱 → 验证码 → 资料 → Turnstile → 完成注册 → OAuth → token。
 
     save_to_file: True 时在本函数内直接把账号追加写入文件（CLI/单进程用）；
                   False 时不写文件，只把账号信息放进返回值，由调用方统一写入
                   （多进程模式下由主进程单点写入，避免文件竞争）。
+    mail_mode:    "moemail"（自动创建临时邮箱）/ "msgraph"（正常微软邮箱）/
+                  "submailbox"（子邮箱，共享收件系统，按收件地址过滤）。
+    graph_account: mail_mode 为 "msgraph"/"submailbox" 时必填，
+                   {"email","password","refresh_token","client_id"}。
+                   注意：这里的 password 是邮箱密码，仅透传记录；Grok 注册会另生成新密码。
     """
     SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
-    # ---- 步骤 0：创建邮箱 ----
+    # 微软邮箱两种模式：msgraph（正常）/ submailbox（子邮箱）
+    is_graph = mail_mode in ("msgraph", "submailbox")
+    is_submailbox = mail_mode == "submailbox"
+
+    # ---- 步骤 0：准备邮箱 ----
     _check_cancel(cancel_callback)
-    print("\n📧 步骤 0：创建 MoEmail 邮箱...", flush=True)
-    try:
-        email, email_id = create_email()
-    except Exception as e:
-        print(f"❌ 创建邮箱失败：{e}", flush=True)
-        import traceback; traceback.print_exc()
-        return {"ok": False, "error": f"创建邮箱失败: {e}"}
+    email_id = None  # 仅 MoEmail 模式使用
+    if is_graph:
+        if not graph_account or not graph_account.get("email"):
+            return {"ok": False, "error": "微软邮箱模式缺少邮箱账号信息"}
+        email = graph_account["email"]
+        if is_submailbox:
+            print(f"\n📧 步骤 0：使用子邮箱 {email}（MS Graph 取件，按收件地址过滤）", flush=True)
+        else:
+            print(f"\n📧 步骤 0：使用微软邮箱 {email}（MS Graph 取件）", flush=True)
+    else:
+        print("\n📧 步骤 0：创建 MoEmail 邮箱...", flush=True)
+        try:
+            email, email_id = create_email()
+        except Exception as e:
+            print(f"❌ 创建邮箱失败：{e}", flush=True)
+            import traceback; traceback.print_exc()
+            return {"ok": False, "error": f"创建邮箱失败: {e}"}
 
     given_name, family_name, password = build_profile()
     print(f"[*] 本次资料：{given_name} {family_name} / 密码 {password}", flush=True)
@@ -832,24 +884,80 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
     print(f"✅ 步骤 3：填写邮箱到 {email_input}", flush=True)
     human_type(page, email_input, email, state, "邮箱输入框")
 
-    # ---- 步骤 4：点击「注册」提交 ----
-    try:
-        btn = page.locator('button[type="submit"]').filter(has_text="注册").first
-        if btn.count() > 0:
-            print("👆 步骤 4：点击 '注册' 提交...", flush=True)
-            time.sleep(1.5)
-            btn.click(delay=100)
-            print("✅ 已提交邮箱", flush=True)
-        else:
-            print("[DEBUG] 未找到 '注册' 提交按钮", flush=True)
-    except Exception as e:
-        print(f"[DEBUG] 点击注册按钮失败：{e}", flush=True)
+    # ---- 步骤 4：点击「注册」提交（带重试）----
+    # 有时点击会落空（网络抖动/点击未生效），此时"注册"按钮仍停留在原地。
+    # 策略：点击后检测提交是否真的生效——若"注册"按钮消失或验证码输入框出现即成功；
+    # 否则最多重试 10 轮，每轮间隔 5s 重新点击。
+    _REG_BTN = 'button[type="submit"]'
+    _CODE_SELS = ['input[name="code"]', 'input[autocomplete="one-time-code"]', 'input[data-input-otp="true"]']
+
+    def _register_submitted():
+        """判断邮箱是否已成功提交：注册按钮消失 或 验证码输入框出现。"""
+        try:
+            for sel in _CODE_SELS:
+                if page.locator(sel).count() > 0:
+                    return True
+        except Exception:
+            pass
+        try:
+            btn = page.locator(_REG_BTN).filter(has_text="注册").first
+            # 按钮不存在或不可见都视为已离开当前步骤
+            if btn.count() == 0 or not btn.is_visible():
+                return True
+        except Exception:
+            # 定位异常时保守认为还没提交
+            return False
+        return False
+
+    submitted = False
+    for attempt in range(1, 11):  # 最多 10 轮
+        _check_cancel(cancel_callback)
+        if _register_submitted():
+            submitted = True
+            break
+        try:
+            btn = page.locator(_REG_BTN).filter(has_text="注册").first
+            if btn.count() > 0:
+                if attempt == 1:
+                    print("👆 步骤 4：点击 '注册' 提交...", flush=True)
+                else:
+                    print(f"🔁 步骤 4：'注册' 按钮仍在，第 {attempt}/10 轮重新点击...", flush=True)
+                time.sleep(1.0)
+                btn.click(delay=100)
+                print("✅ 已提交邮箱", flush=True)
+            else:
+                # 按钮不在但也没检测到验证码框，稍等下一轮再判断
+                print(f"[DEBUG] 第 {attempt}/10 轮未找到 '注册' 按钮，等待页面状态...", flush=True)
+        except Exception as e:
+            print(f"[DEBUG] 第 {attempt}/10 轮点击注册按钮失败：{e}", flush=True)
+
+        # 点击后等待页面响应，再进入下一轮检测
+        deadline_click = time.time() + 5
+        while time.time() < deadline_click:
+            _check_cancel(cancel_callback)
+            if _register_submitted():
+                submitted = True
+                break
+            time.sleep(0.5)
+        if submitted:
+            break
+
+    if submitted:
+        print("✅ 邮箱提交已生效（注册按钮消失/验证码框已出现）", flush=True)
+    else:
+        print("⚠️ 多轮点击后仍未确认邮箱提交生效，继续尝试后续步骤", flush=True)
 
     # ---- 步骤 5：获取并填写验证码 ----
     _check_cancel(cancel_callback)
     print("\n🔑 步骤 5：等待并获取验证码...", flush=True)
     try:
-        raw_code = fetch_verification_code(email, email_id, timeout=180, cancel_callback=cancel_callback)
+        if is_graph:
+            raw_code = fetch_verification_code_graph(
+                graph_account, timeout=180, cancel_callback=cancel_callback,
+                submailbox=is_submailbox,
+            )
+        else:
+            raw_code = fetch_verification_code(email, email_id, timeout=180, cancel_callback=cancel_callback)
     except Exception as e:
         if isinstance(e, CancelledError):
             raise
