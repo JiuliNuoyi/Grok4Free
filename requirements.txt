@@ -1,0 +1,6 @@
+# Grok4Free 依赖
+# Camoufox 反检测浏览器（含 geoip 地理定位，与代理出口 IP 一致）
+camoufox[geoip]
+
+# HTTP 客户端（带浏览器指纹的 requests）
+curl_cffi

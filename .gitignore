@@ -1,0 +1,38 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Linux desktop files
+*.desktop
+
+# 配置文件（含密钥！）
+config.json
+
+# 产物文件
+accounts_*.txt
+mail_credentials.txt
+
+# 浏览器缓存
+.camoufox/
+.browsers/
+.user_data/
+
+# 临时文件
+*.log
+tmp_*

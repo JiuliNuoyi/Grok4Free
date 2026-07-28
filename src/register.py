@@ -1,0 +1,950 @@
+#!/usr/bin/env python3
+"""Grok4Free Camoufox 注册主流程：创建邮箱 → 注册 → OAuth → token。
+
+从原项目 test_camoufox_mvp.py 搬运并适配，改为使用新项目的本地模块（config、mail_moemail、oauth、account_store）。
+完全独立，不依赖原 grok-register 项目。
+
+运行方式:
+    python run.py            # GUI 模式（通过 run.py 分发）
+    python -m src.register   # CLI 命令行模式（单次注册）
+    python -m src.register --count 3 --headless  # 批量注册
+"""
+
+import sys
+import time
+import random
+import string
+import secrets
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+
+try:
+    from camoufox.sync_api import Camoufox
+except ImportError:
+    print("❌ 请安装 camoufox: pip install camoufox[geoip]")
+    sys.exit(1)
+
+
+# ============================================================================
+# 配置与邮箱服务
+# ===========================================================================
+def get_proxy_config():
+    """从 config.json 读取代理，解析成 Camoufox/Playwright 需要的格式。
+    
+    Returns:
+        (playwright_proxy, raw_proxy_url): 
+          - playwright_proxy: {"server", "username"?, "password"?} 或 None
+          - raw_proxy_url: 原始代理字符串（供 OAuth/token 请求复用）
+    """
+    import urllib.parse
+    from .config import load_config, get_proxy
+    
+    cfg = load_config()
+    raw = str(get_proxy(cfg) or "").strip()
+    if not raw:
+        return None, ""
+    if "://" not in raw:
+        raw = "http://" + raw
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except Exception as e:
+        print(f"[!] 代理解析失败，将直连：{e}", flush=True)
+        return None, ""
+    if not parts.hostname:
+        print("[!] 代理缺少主机名，将直连", flush=True)
+        return None, ""
+    scheme = parts.scheme or "http"
+    server = f"{scheme}://{parts.hostname}"
+    if parts.port:
+        server += f":{parts.port}"
+    pw_proxy = {"server": server}
+    if parts.username:
+        pw_proxy["username"] = urllib.parse.unquote(parts.username)
+    if parts.password:
+        pw_proxy["password"] = urllib.parse.unquote(parts.password)
+    return pw_proxy, raw
+
+
+def create_email():
+    """调用 MoEmail 服务创建邮箱，返回 (email, email_id)。"""
+    from .config import load_config
+    from .mail_moemail import create_email as _create_email
+    
+    cfg = load_config()
+    email, email_id = _create_email(cfg)
+    print(f"✅ 已创建真实邮箱：{email} (id={email_id})", flush=True)
+    return email, email_id
+
+
+def fetch_verification_code(email, email_id, timeout=180, log_callback=None, cancel_callback=None):
+    """轮询邮箱获取验证码。"""
+    from .config import load_config
+    from .mail_moemail import poll_verification_code, extract_verification_code
+    
+    cfg = load_config()
+    
+    def my_log(msg):
+        if log_callback:
+            log_callback(msg)
+    
+    print(f"[*] 正在为 {email} 拉取验证码（最多等 {timeout} 秒）...", flush=True)
+    
+    code = poll_verification_code(
+        email_id=email_id,
+        config=cfg,
+        timeout=timeout,
+        poll_interval=3,
+        log_callback=lambda m: print("   " + m, flush=True),
+        resend_callback=None,
+        cancel_callback=cancel_callback,
+    )
+    return code
+
+
+# ============================================================================
+# 注册资料生成（姓名 + 密码）
+# ===========================================================================
+_GIVEN_NAMES = [
+    "Neo", "Ethan", "Liam", "Noah", "Lucas", "Mason", "Ryan", "Leo",
+    "Owen", "Aiden", "Ivan", "Nolan", "Evan", "Kai", "Caleb", "Adam",
+    "Ezra", "Miles", "Logan", "Carter", "Hunter", "Jason", "Brian", "Dylan",
+    "Alex", "Colin", "Blake", "Gavin", "Henry", "Julian", "Kevin", "Louis",
+    "Marcus", "Nathan", "Oscar", "Peter", "Simon", "Victor", "Wesley", "Felix",
+]
+_FAMILY_NAMES = [
+    "Lin", "Wang", "Zhao", "Liu", "Chen", "Zhang", "Xu", "Sun",
+    "Guo", "Yang", "Wu", "Zhou", "Tang", "Qin", "Shi", "Fang",
+    "Peng", "Cao", "Deng", "Fan", "Gao", "Han", "Hu", "Jiang",
+    "Lu", "Ma", "Pan", "Ren", "Tian", "Xie", "Yan", "Yao",
+    "Yu", "Zeng", "Bai", "Hou", "Jin", "Luo", "Song", "Wei",
+]
+
+
+def generate_password(length=10):
+    """生成随机密码：含大写、小写、数字、特殊符号各至少 1 个。"""
+    if length < 4:
+        length = 4
+    lowers = string.ascii_lowercase
+    uppers = string.ascii_uppercase
+    digits = string.digits
+    specials = "!@#$%^&*-_=+"
+    chars = [
+        secrets.choice(lowers),
+        secrets.choice(uppers),
+        secrets.choice(digits),
+        secrets.choice(specials),
+    ]
+    pool = lowers + uppers + digits + specials
+    chars += [secrets.choice(pool) for _ in range(length - 4)]
+    secrets.SystemRandom().shuffle(chars)
+    return "".join(chars)
+
+
+def build_profile():
+    """返回 (given_name, family_name, password)。"""
+    given_name = secrets.choice(_GIVEN_NAMES)
+    family_name = secrets.choice(_FAMILY_NAMES)
+    password = generate_password(10)
+    return given_name, family_name, password
+
+
+# ============================================================================
+# 拟人化鼠标/键盘工具
+# ===========================================================================
+def _move_to(page, box):
+    """移动到元素框内一个略偏离中心的随机点，返回点击坐标"""
+    tx = box["x"] + box["width"] * random.uniform(0.35, 0.65)
+    ty = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+    page.mouse.move(tx, ty)
+    return tx, ty
+
+
+def human_click(page, selector: str, state: dict, label="元素") -> bool:
+    try:
+        loc = page.locator(selector).first
+        loc.wait_for(state="visible", timeout=10_000)
+        loc.scroll_into_view_if_needed(timeout=5_000)
+        box = loc.bounding_box()
+        if not box:
+            print(f"⚠️ 无法获取 {label} 坐标")
+            return False
+        tx, ty = _move_to(page, box)
+        time.sleep(random.uniform(0.05, 0.18))
+        page.mouse.click(tx, ty, delay=random.uniform(40, 110))
+        state["pos"] = (tx, ty)
+        print(f"✅ 拟人化点击：{label}")
+        return True
+    except Exception as e:
+        print(f"❌ {label} 点击失败：{e}")
+        return False
+
+
+def human_type(page, selector: str, text: str, state: dict, label="输入框") -> bool:
+    try:
+        loc = page.locator(selector).first
+        loc.wait_for(state="visible", timeout=10_000)
+        loc.scroll_into_view_if_needed(timeout=5_000)
+        box = loc.bounding_box()
+        if not box:
+            print(f"⚠️ 无法获取 {label} 坐标")
+            return False
+        tx, ty = _move_to(page, box)
+        time.sleep(random.uniform(0.05, 0.15))
+        page.mouse.click(tx, ty, delay=random.uniform(40, 90))
+        state["pos"] = (tx, ty)
+        time.sleep(random.uniform(0.15, 0.35))
+        for ch in text:
+            page.keyboard.type(ch, delay=random.uniform(45, 140))
+            if random.random() < 0.06:
+                time.sleep(random.uniform(0.25, 0.7))
+        time.sleep(random.uniform(0.2, 0.45))
+        try:
+            val = loc.input_value(timeout=2000)
+        except Exception:
+            val = ""
+        ok = val.strip() == text.strip()
+        print(f"{'✅' if ok else '⚠️'} 拟人化输入：{label} -> '{val}' (期望 '{text}')")
+        return ok
+    except Exception as e:
+        print(f"❌ {label} 输入失败：{e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def human_type_otp(page, selector: str, text: str, state: dict, label="验证码") -> bool:
+    """针对 OTP 输入框的特殊填写（支持 input-otp 组件）。"""
+    try:
+        loc = page.locator(selector).first
+        loc.wait_for(state="visible", timeout=10_000)
+        
+        # 尝试多种方式聚焦并点击
+        box = loc.bounding_box()
+        if box:
+            tx, ty = _move_to(page, box)
+            time.sleep(random.uniform(0.05, 0.15))
+            page.mouse.click(tx, ty, delay=random.uniform(40, 90))
+            state["pos"] = (tx, ty)
+        else:
+            loc.focus()
+        
+        time.sleep(random.uniform(0.2, 0.4))
+        
+        # 逐字符输入
+        for ch in text:
+            page.keyboard.type(ch, delay=random.uniform(60, 140))
+        
+        time.sleep(random.uniform(0.3, 0.6))
+        
+        # 尝试多种方法验证输入值
+        val = ""
+        methods = [
+            # 1. JavaScript querySelector
+            lambda: page.evaluate(
+                "(sel) => { const e = document.querySelector(sel); return e ? (e.value || '') : ''; }",
+                selector,
+            ),
+            # 2. direct value from locator
+            lambda: loc.input_value(timeout=2000),
+            # 3. data-input-value attribute (input-otp 常用)
+            lambda: page.locator(selector).first.get_attribute("data-input-value"),
+            # 4. first child input's value
+            lambda: page.locator(f"{selector} input").first.input_value(timeout=2000),
+        ]
+        
+        for method in methods:
+            try:
+                val = method()
+                if val and len(val) == len(text):
+                    break
+            except Exception:
+                continue
+        
+        ok = str(val).strip().upper() == str(text).strip().upper()
+        print(f"{'✅' if ok else '⚠️'} 拟人化输入：{label} -> '{val}' (期望 '{text}')", flush=True)
+        return ok
+    except Exception as e:
+        import traceback
+        print(f"❌ {label} 输入失败：{e}", flush=True)
+        traceback.print_exc()
+        return False
+
+
+def wait_for_turnstile(page, timeout=90, cancel_callback=None):
+    """等待 Cloudflare Turnstile 自动验证完成。"""
+    print("⏳ 等待 Turnstile 自动验证...", flush=True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        _check_cancel(cancel_callback)
+        try:
+            token = page.evaluate(
+                """() => {
+                    const el = document.querySelector('input[name="cf-turnstile-response"]');
+                    return el ? (el.value || '') : '';
+                }"""
+            )
+            if token and len(str(token)) > 20:
+                print(f"✅ Turnstile 已完成 (token 长度 {len(str(token))})", flush=True)
+                return True
+        except Exception:
+            pass
+        try:
+            if page.locator("text=成功").count() > 0:
+                if page.locator("text=成功").first.is_visible():
+                    print("✅ Turnstile 显示 '成功！'", flush=True)
+                    return True
+        except Exception:
+            pass
+        time.sleep(1.5)
+    print("⚠️ Turnstile 等待超时", flush=True)
+    return False
+
+
+def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callback=None):
+    """在同一浏览器中完成 OAuth 设备授权登录。"""
+    _check_cancel(cancel_callback)
+    print("\n🔐 OAuth 授权登录流程开始...", flush=True)
+
+    # 点击「继续」
+    try:
+        btn = page.locator('button[type="submit"]').filter(has_text="继续").first
+        if btn.count() > 0:
+            print("👆 点击 '继续'...", flush=True)
+            time.sleep(1.2)
+            btn.click(delay=100)
+            time.sleep(3.0)
+            print("✅ 已点击 '继续'", flush=True)
+        else:
+            print("[DEBUG] 未找到 '继续' 按钮", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 点击继续失败：{e}", flush=True)
+
+    time.sleep(1.5)
+
+    # 检测分支：允许授权页（已登录）还是 使用邮箱登录（未登录）
+    allow_exists = False
+    email_login_exists = False
+    try:
+        allow_exists = page.locator('button[type="submit"]').filter(has_text="允许").count() > 0
+    except Exception:
+        pass
+    try:
+        email_login_exists = page.locator('button[data-testid="continue-with-email"]').count() > 0
+    except Exception:
+        pass
+
+    print(f"[DEBUG] 分支检测：允许={allow_exists}, 邮箱登录={email_login_exists}", flush=True)
+
+    # 情况 B：已登录，直接授权（可能需要「继续」→「允许」多步）
+    if allow_exists:
+        print("🅱️ 检测到授权确认页（账号已登录）...", flush=True)
+        _handle_authorize_buttons(page, cancel_callback=cancel_callback, timeout=timeout)
+        print("✅ OAuth 授权登录执行完毕（免密授权）", flush=True)
+        time.sleep(2.0)
+        return True
+
+    # 情况 A：未登录，走邮箱密码登录
+    try:
+        btn = page.locator('button[data-testid="continue-with-email"]').first
+        if btn.count() > 0:
+            print("👆 A：点击 '使用邮箱登录'...", flush=True)
+            time.sleep(1.2)
+            btn.click(delay=100)
+            time.sleep(3.0)  # 等待跳转到新页面
+            print("✅ 已点击 '使用邮箱登录'", flush=True)
+        else:
+            print("[DEBUG] 未找到 '使用邮箱登录' 按钮", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 点击使用邮箱登录失败：{e}", flush=True)
+
+    time.sleep(1.5)
+    
+    # 检查是否需要先点 "下一步" / "继续"
+    _check_cancel(cancel_callback)
+
+    # 填写邮箱
+    if page.locator('input[data-testid="email"]').count() > 0:
+        print("📧 填写登录邮箱...", flush=True)
+        human_type(page, 'input[data-testid="email"]', email, state, "登录邮箱")
+        time.sleep(0.8)
+        
+        # 尝试点击 "下一步" / "继续" 按钮
+        try:
+            submit_btn = page.locator('button[type="submit"]').filter(has_text="下一步").first
+            if submit_btn.count() > 0:
+                print("👆 点击 '下一步'...", flush=True)
+                submit_btn.click(delay=100)
+                time.sleep(2.0)  # 等待跳转到密码页
+                print("✅ 已点击 '下一步'", flush=True)
+            else:
+                submit_btn = page.locator('button[type="submit"]').filter(has_text="继续").first
+                if submit_btn.count() > 0:
+                    print("👆 点击 '继续'...", flush=True)
+                    submit_btn.click(delay=100)
+                    time.sleep(2.0)
+                    print("✅ 已点击 '继续'", flush=True)
+        except Exception:
+            print("[DEBUG] 无'下一步'/ '继续'按钮，直接进入密码输入", flush=True)
+            
+    else:
+        print("⚠️ OAuth 登录页未找到邮箱输入框", flush=True)
+        return False
+
+    _check_cancel(cancel_callback)
+    time.sleep(1.0)
+
+    # 填写密码（尝试多种选择器）
+    password_selector = None
+    for sel in ['input[data-testid="password"]', 'input[type="password"]', 'input[name="password"]']:
+        try:
+            if page.locator(sel).count() > 0:
+                password_selector = sel
+                break
+        except Exception:
+            continue
+            
+    if password_selector:
+        print(f"🔑 在 {password_selector} 填写登录密码...", flush=True)
+        human_type(page, password_selector, password, state, "登录密码")
+    else:
+        print("⚠️ OAuth 登录页未找到密码输入框", flush=True)
+        return False
+
+    time.sleep(1.0)
+
+    # 等待 Turnstile
+    print("🛡️ 等待 Turnstile 验证...", flush=True)
+    wait_for_turnstile(page, timeout=timeout, cancel_callback=cancel_callback)
+
+    # 点击「登录」
+    try:
+        btn = page.locator('button[data-testid="sign-in-submit"]').first
+        if btn.count() > 0:
+            print("🎯 点击 '登录'...", flush=True)
+            time.sleep(1.2)
+            btn.click(delay=100)
+            print("✅ 已点击 '登录'！", flush=True)
+        else:
+            btn = page.locator('button[type="submit"]').filter(has_text="登录").first
+            if btn.count() > 0:
+                print("🎯 点击 '登录'（文本匹配）...", flush=True)
+                time.sleep(1.2)
+                btn.click(delay=100)
+                print("✅ 已点击 '登录'！", flush=True)
+            else:
+                print("[DEBUG] 未找到 '登录' 按钮", flush=True)
+                return False
+    except Exception as e:
+        print(f"[DEBUG] 点击登录失败：{e}", flush=True)
+        return False
+
+    time.sleep(3.0)
+
+    # 点击登录后会跳转到 oauth2/device 页面，需要额外等待页面完全加载
+    print("[DEBUG] 等待 OAuth 授权页加载...", flush=True)
+    time.sleep(3.0)
+    
+    # 检查授权确认页：登录后可能需要依次点击「继续」和「允许」
+    # x.ai 的流程不固定，可能是：直接允许 / 继续→允许 / 继续→继续→允许
+    # 用循环逐步处理，每轮找一个可点的授权按钮，直到完成或超时
+    _check_cancel(cancel_callback)
+    _handle_authorize_buttons(page, cancel_callback=cancel_callback, timeout=timeout)
+
+    print("✅ OAuth 授权登录流程执行完毕", flush=True)
+    
+    # 等待一小段时间让授权生效
+    time.sleep(2.0)
+    
+    return True
+
+
+def _handle_authorize_buttons(page, cancel_callback=None, timeout=60):
+    """循环处理 OAuth 授权页的「继续」/「允许」按钮。
+
+    x.ai 授权流程步骤数不固定，登录成功后通常还需要：
+      「继续」→「允许」
+    也可能是：直接「允许」 / 「继续」→「继续」→「允许」
+    
+    策略：每轮扫描页面上可点的授权按钮并点击（优先允许 > 继续）。
+    第一轮会额外等待页面加载，找到按钮立即点击并进入下一轮重新扫描。
+    只有完全扫不到任何按钮时，才用 URL 判断是否已跳转完成。
+    """
+    deadline = time.time() + timeout
+    clicked_allow = False
+    empty_rounds = 0
+    first_round = True  # 标记是否第一轮
+
+    while time.time() < deadline and not clicked_allow:
+        _check_cancel(cancel_callback)
+        acted = False
+
+        # 第一轮额外等待，确保登录后的新页面完全加载
+        if first_round:
+            first_round = False
+            print("[DEBUG] [第一轮] 额外等待 2 秒让页面加载", flush=True)
+            time.sleep(2.0)
+
+        # 优先找「允许」（授权流程最后一步）
+        try:
+            allow_btn = page.locator('button[type="submit"]').filter(has_text="允许").first
+            if allow_btn.count() > 0 and allow_btn.is_visible():
+                print("🅱️ 检测到 '允许' 按钮，点击...", flush=True)
+                time.sleep(1.0)
+                allow_btn.click(delay=100)
+                print("✅ 已点击 '允许'！授权完成", flush=True)
+                clicked_allow = True
+                time.sleep(2.0)
+                break
+        except Exception as e:
+            print(f"[DEBUG] 扫描 '允许' 按钮失败：{e}", flush=True)
+            pass
+
+        # 其次找「继续」（授权流程中间步骤）
+        try:
+            continue_btn = page.locator('button[type="submit"]').filter(has_text="继续").first
+            if continue_btn.count() > 0 and continue_btn.is_visible():
+                print("👆 检测到 '继续' 按钮，点击...", flush=True)
+                time.sleep(1.0)
+                continue_btn.click(delay=100)
+                print("✅ 已点击 '继续'", flush=True)
+                acted = True
+                time.sleep(2.5)  # 等待跳转到下一页
+                empty_rounds = 0
+                continue  # 立即进入下一轮，重新扫描按钮
+        except Exception as e:
+            print(f"[DEBUG] 扫描 '继续' 按钮失败：{e}", flush=True)
+            pass
+
+        # 本轮没找到任何授权按钮
+        if not acted:
+            empty_rounds += 1
+            # 连续 3 轮都没按钮，才检查是否已经跳转完成（放宽到 3 轮避免误判）
+            if empty_rounds >= 3:
+                if _check_authorization_complete(page):
+                    print("✅ 未见授权按钮且页面已跳转，视为授权完成", flush=True)
+                    break
+                if empty_rounds >= 5:
+                    print("[DEBUG] 连续多轮未找到授权按钮，停止等待", flush=True)
+                    break
+            time.sleep(1.5)
+
+    if not clicked_allow:
+        print("[DEBUG] 未点击到 '允许' 按钮，token 轮询可能仍会成功（若已授权）", flush=True)
+
+
+
+def _check_authorization_complete(page):
+    """检测 OAuth 授权是否真正完成。
+
+    注意：整个授权流程都在 accounts.x.ai 域名下进行（继续/登录/允许页都是），
+    所以不能笼统地用 "x.ai in url" 判断，否则会把中间页误判为完成。
+    真正完成的标志：跳转到 grok.com 主站，或明确的 device success 成功页。
+    """
+    try:
+        url = (page.url or "").lower()
+
+        # 中间页（授权流程中的各步骤），明确视为"未完成"
+        intermediate_markers = ["/oauth2/authorize", "/login", "/sign-in", "/oauth2/device"]
+        if any(m in url for m in intermediate_markers):
+            # 但 device/success 或带 success 的算完成
+            if "success" in url:
+                return True
+            return False
+
+        # 真正完成：跳转到 grok 主站
+        if "grok.com" in url:
+            return True
+
+        # 明确的成功提示文本
+        for text in ["授权成功", "authorized", "You may now close"]:
+            try:
+                if page.locator(f"text={text}").count() > 0:
+                    return True
+            except Exception:
+                pass
+
+        return False
+    except Exception:
+        return False
+
+
+# ============================================================================
+# 完整注册流程
+# ===========================================================================
+class CancelledError(Exception):
+    """用户请求停止时抛出，用于中断注册流程。"""
+    pass
+
+
+def _check_cancel(cancel_callback):
+    """检查是否请求停止，是则抛 CancelledError。"""
+    if cancel_callback and cancel_callback():
+        raise CancelledError()
+
+
+def _cancellable_sleep(seconds, cancel_callback):
+    """可被取消打断的 sleep：按 0.2s 分片检查停止标志。"""
+    deadline = time.time() + max(seconds, 0)
+    while time.time() < deadline:
+        _check_cancel(cancel_callback)
+        time.sleep(min(0.2, max(deadline - time.time(), 0)))
+
+
+def run_live(page, state, proxy="", cancel_callback=None):
+    """完整注册流程：创建邮箱 → 填邮箱 → 验证码 → 资料 → Turnstile → 完成注册 → OAuth → token。"""
+    SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
+
+    # ---- 步骤 0：创建邮箱 ----
+    _check_cancel(cancel_callback)
+    print("\n📧 步骤 0：创建 MoEmail 邮箱...", flush=True)
+    try:
+        email, email_id = create_email()
+    except Exception as e:
+        print(f"❌ 创建邮箱失败：{e}", flush=True)
+        import traceback; traceback.print_exc()
+        return {"ok": False, "error": f"创建邮箱失败: {e}"}
+
+    given_name, family_name, password = build_profile()
+    print(f"[*] 本次资料：{given_name} {family_name} / 密码 {password}", flush=True)
+
+    # ---- 步骤 1：打开注册页 ----
+    print(f"\n🚀 步骤 1：打开注册页 {SIGNUP_URL} ...", flush=True)
+    page.goto(SIGNUP_URL, wait_until="networkidle", timeout=45_000)
+    print(f"✅ 当前 URL: {page.url}", flush=True)
+    time.sleep(3.0)
+
+    # ---- 步骤 2：点击「使用邮箱注册」 ----
+    _check_cancel(cancel_callback)
+    try:
+        btn = page.locator('button').filter(has_text="使用邮箱注册").first
+        if btn.count() > 0:
+            print("👆 步骤 2：点击 '使用邮箱注册'...", flush=True)
+            time.sleep(1.5)
+            btn.click(delay=100)
+            time.sleep(2.5)
+            print("✅ 邮箱注册按钮已点击", flush=True)
+        else:
+            print("[DEBUG] 未找到 '使用邮箱注册' 按钮", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 点击邮箱注册按钮失败：{e}", flush=True)
+
+    time.sleep(2.0)
+
+    # ---- 步骤 3：填写邮箱 ----
+    _check_cancel(cancel_callback)
+    email_input = None
+    for sel in ['input[data-testid="email"]', 'input[name="email"]']:
+        try:
+            if page.locator(sel).count() > 0:
+                email_input = sel
+                break
+        except Exception:
+            pass
+    if not email_input:
+        print("⚠️ 未找到邮箱输入框", flush=True)
+        return {"ok": False, "email": email, "error": "未找到邮箱输入框"}
+    print(f"✅ 步骤 3：填写邮箱到 {email_input}", flush=True)
+    human_type(page, email_input, email, state, "邮箱输入框")
+
+    # ---- 步骤 4：点击「注册」提交 ----
+    try:
+        btn = page.locator('button[type="submit"]').filter(has_text="注册").first
+        if btn.count() > 0:
+            print("👆 步骤 4：点击 '注册' 提交...", flush=True)
+            time.sleep(1.5)
+            btn.click(delay=100)
+            print("✅ 已提交邮箱", flush=True)
+        else:
+            print("[DEBUG] 未找到 '注册' 提交按钮", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 点击注册按钮失败：{e}", flush=True)
+
+    # ---- 步骤 5：获取并填写验证码 ----
+    _check_cancel(cancel_callback)
+    print("\n🔑 步骤 5：等待并获取验证码...", flush=True)
+    try:
+        raw_code = fetch_verification_code(email, email_id, timeout=180, cancel_callback=cancel_callback)
+    except Exception as e:
+        if isinstance(e, CancelledError):
+            raise
+        # MailError("用户取消轮询") 也视为取消
+        if "取消" in str(e):
+            raise CancelledError()
+        print(f"❌ 获取验证码失败：{e}", flush=True)
+        return {"ok": False, "email": email, "error": f"获取验证码失败: {e}"}
+    clean_code = str(raw_code).replace("-", "").strip()
+    print(f"✅ 验证码：{raw_code} -> 去连字符填入 '{clean_code}'", flush=True)
+
+    # 等待验证码输入框
+    code_input = None
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        _check_cancel(cancel_callback)
+        for sel in ['input[name="code"]', 'input[autocomplete="one-time-code"]', 'input[data-input-otp="true"]']:
+            try:
+                if page.locator(sel).count() > 0:
+                    code_input = sel
+                    break
+            except Exception:
+                pass
+        if code_input:
+            break
+        time.sleep(1.0)
+    if not code_input:
+        print("⚠️ 未找到验证码输入框", flush=True)
+        return {"ok": False, "email": email, "error": "未找到验证码输入框"}
+    print(f"✅ 找到验证码输入框：{code_input}", flush=True)
+    human_type_otp(page, code_input, clean_code, state, "验证码")
+    time.sleep(2.0)
+
+    # ---- 步骤 6：填写资料 ----
+    _check_cancel(cancel_callback)
+    print("\n📝 步骤 6：填写资料...", flush=True)
+    deadline = time.time() + 20
+    profile_ready = False
+    while time.time() < deadline:
+        _check_cancel(cancel_callback)
+        try:
+            if page.locator('input[data-testid="givenName"]').count() > 0:
+                profile_ready = True
+                break
+        except Exception:
+            pass
+        time.sleep(1.0)
+    if not profile_ready:
+        print("⚠️ 未出现资料表单", flush=True)
+        return {"ok": False, "email": email, "error": "未出现资料表单"}
+
+    human_type(page, 'input[data-testid="givenName"]', given_name, state, "名")
+    time.sleep(random.uniform(0.3, 0.7))
+    human_type(page, 'input[data-testid="familyName"]', family_name, state, "姓")
+    time.sleep(random.uniform(0.3, 0.7))
+    human_type(page, 'input[data-testid="password"]', password, state, "密码")
+    time.sleep(1.0)
+
+    # ---- 步骤 7：等待 Turnstile ----
+    _check_cancel(cancel_callback)
+    print("\n🛡️ 步骤 7：等待 Turnstile 验证...", flush=True)
+    wait_for_turnstile(page, timeout=90, cancel_callback=cancel_callback)
+
+    # ---- 步骤 8：点击「完成注册」 ----
+    _check_cancel(cancel_callback)
+    print("\n🎯 步骤 8：点击 '完成注册'...", flush=True)
+    try:
+        btn = page.locator('button[type="submit"]').filter(has_text="完成注册").first
+        if btn.count() > 0:
+            time.sleep(1.5)
+            btn.click(delay=100)
+            print("✅ 已点击 '完成注册'！", flush=True)
+        else:
+            print("[DEBUG] 未找到 '完成注册' 按钮", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 点击完成注册失败：{e}", flush=True)
+
+    print(f"\n📋 账号信息：{email} / {password}", flush=True)
+    time.sleep(5.0)
+
+    # ================= OAuth 设备授权登录 =================
+    _check_cancel(cancel_callback)
+    print("\n" + "=" * 60, flush=True)
+    print("开始 OAuth 设备授权登录", flush=True)
+    print("=" * 60, flush=True)
+    
+    # 导入本地 OAuth
+    from .oauth.device import request_device_code, poll_device_token
+    
+    # 请求设备码
+    print("[*] 请求 OAuth 设备码...", flush=True)
+    try:
+        session = request_device_code(timeout=20.0, proxy=proxy or None, cancel=cancel_callback)
+    except Exception as e:
+        print(f"❌ 请求设备码失败：{e}", flush=True)
+        return {"ok": False, "email": email, "error": f"请求设备码失败：{e}"}
+    print(f"✅ 设备码已生成，user_code: {session.user_code}", flush=True)
+
+    # 打开授权链接
+    _check_cancel(cancel_callback)
+    print(f"\n🚀 打开授权链接...", flush=True)
+    page.goto(session.verification_uri_complete, wait_until="networkidle", timeout=45_000)
+    time.sleep(3.0)
+
+    # 执行授权登录
+    login_ok = oauth_authorize_login(page, state, email, password, timeout=90, cancel_callback=cancel_callback)
+    if not login_ok:
+        print("⚠️ OAuth 授权登录未成功完成", flush=True)
+
+    # 轮询获取 token
+    _check_cancel(cancel_callback)
+    print("\n🔄 开始轮询获取 token...", flush=True)
+    try:
+        token = poll_device_token(
+            device_code=session.device_code,
+            token_endpoint=session.token_endpoint,
+            interval=session.interval,
+            expires_in=session.expires_in,
+            timeout=30.0,
+            proxy=proxy or None,
+            cancel=cancel_callback,
+            log=lambda m: print("   " + m, flush=True),
+        )
+        print("\n🎉 Token 获取成功！", flush=True)
+        print(f"   access_token:  {token.access_token[:40]}...", flush=True)
+        print(f"   refresh_token: {token.refresh_token[:40]}...", flush=True)
+        
+        # 保存账号
+        from .account_store import append_account
+        import os
+        out_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "accounts_<timestamp>.txt")
+        append_account(out_file, email, password, token.refresh_token)
+        print(f"\n💾 账号已追加保存到：{out_file}", flush=True)
+        print(f"   内容：{email}----{password}----{token.refresh_token[:20]}...", flush=True)
+        
+        return {
+            "ok": True,
+            "email": email,
+            "password": password,
+            "rt": token.refresh_token,
+            "access_token": token.access_token,
+            "id_token": getattr(token, "id_token", None),
+        }
+    except Exception as e:
+        print(f"❌ 轮询 token 失败：{e}", flush=True)
+        import traceback; traceback.print_exc()
+        return {"ok": False, "email": email, "error": f"轮询 token 失败：{e}"}
+
+
+# ============================================================================
+# 注册入口
+# ===========================================================================
+class _LogRedirect:
+    """把 print 的输出按行转发给 log_callback，同时保留原 stdout。"""
+    def __init__(self, callback, original):
+        self._callback = callback
+        self._original = original
+        self._buffer = ""
+
+    def write(self, text):
+        if self._original:
+            try:
+                self._original.write(text)
+            except Exception:
+                pass
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                try:
+                    self._callback(line)
+                except Exception:
+                    pass
+
+    def flush(self):
+        if self._original:
+            try:
+                self._original.flush()
+            except Exception:
+                pass
+
+
+def run_registration_flow(
+    log_callback=None,
+    headless=False,
+    count=1,
+    cancel_callback=None,
+    observer=None,
+):
+    """执行一次或多次完整的 Camoufox 注册 + OAuth 授权流程。
+    
+    Args:
+        log_callback: 可选，接收每行日志的回调
+        headless: 是否无头模式
+        count: 循环次数
+        cancel_callback: 可选，返回 True 表示停止
+        observer: 可选，每次完成后调用 observer(result)
+    
+    Returns:
+        (success_count, fail_count, total)
+    """
+    import contextlib
+
+    # 读取代理配置
+    pw_proxy, raw_proxy = get_proxy_config()
+    if pw_proxy:
+        print(f"[*] 使用代理：{pw_proxy['server']}"
+              + ("（含账号密码认证）" if pw_proxy.get("username") else ""), flush=True)
+    else:
+        print("[*] 未配置代理，浏览器将直连", flush=True)
+
+    def _flow_one():
+        state = {"pos": None}
+        try:
+            camoufox_kwargs = dict(
+                headless=headless,
+                humanize=True,
+                os="windows",
+                locale="zh-CN",
+                firefox_user_prefs={
+                    "intl.accept_languages": "zh-CN,zh,en-US,en",
+                    "intl.locale.requested": "zh-CN",
+                },
+                window=[1400, 900],
+            )
+            if pw_proxy:
+                camoufox_kwargs["proxy"] = pw_proxy
+                camoufox_kwargs["geoip"] = True
+            with Camoufox(**camoufox_kwargs) as browser:
+                print("✅ Camoufox 启动成功！")
+                page = browser.new_page()
+                return run_live(page, state, proxy=raw_proxy, cancel_callback=cancel_callback)
+        except CancelledError:
+            print("\n[!] 已停止当前注册（浏览器已关闭）", flush=True)
+            return {"ok": False, "error": "用户停止", "cancelled": True}
+        except Exception as e:
+            # OAuth 层的取消也识别为取消
+            if "cancelled" in str(e).lower() or "取消" in str(e):
+                print("\n[!] 已停止当前注册（浏览器已关闭）", flush=True)
+                return {"ok": False, "error": "用户停止", "cancelled": True}
+            print(f"❌ 运行失败：{e}")
+            import traceback
+            traceback.print_exc()
+            return {"ok": False, "error": str(e)}
+
+    print("=" * 60)
+    print("Camoufox + 拟人化鼠标/键盘 注册流程")
+    print("=" * 60)
+
+    success_count = fail_count = 0
+    for i in range(1, count + 1):
+        if cancel_callback and cancel_callback():
+            print("\n[!] 用户请求停止", flush=True)
+            break
+        print(f"\n{'='*60}\n第 {i}/{count} 次注册\n" + "="*60)
+
+        if log_callback is not None:
+            redirect = _LogRedirect(log_callback, sys.__stdout__)
+            with contextlib.redirect_stdout(redirect), contextlib.redirect_stderr(redirect):
+                result = _flow_one()
+        else:
+            result = _flow_one()
+
+        # 用户中途停止：不计入成功/失败，直接结束
+        if result.get("cancelled"):
+            print("\n[!] 注册已被用户停止", flush=True)
+            break
+
+        if observer and callable(observer):
+            try:
+                observer(result)
+            except Exception as e:
+                print(f"[!] observer 异常：{e}", flush=True)
+
+        if result.get("ok"):
+            success_count += 1
+        else:
+            fail_count += 1
+
+    total = success_count + fail_count
+    print(f"\n{'='*60}\n注册完成：成功 {success_count} | 失败 {fail_count} | 总数 {total}\n{'='*60}")
+    return success_count, fail_count, total
