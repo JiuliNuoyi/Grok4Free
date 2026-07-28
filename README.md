@@ -43,44 +43,122 @@ Grok4Free 是一个完全独立的 Grok 账号自动注册工具，实现了从*
 
 ## 🚀 快速开始
 
-### ⚡ 一键启动（推荐新手）
+### ⚡ 方式一：一键启动脚本（强烈推荐新手）
+
+最简单的方式是使用我们提供的启动脚本，它会自动完成所有环境配置。
 
 #### Linux / macOS
 ```bash
+cd Grok4Free
 chmod +x start-gui.sh
 ./start-gui.sh
 ```
 
 #### Windows
-双击 `start-gui.bat` 或右键 → "以管理员身份运行"
+1. 确保已安装 Python 3.10+ (https://www.python.org/downloads/)
+2. 双击 `start-gui.bat` 或右键 → "以管理员身份运行"
 
 **脚本自动完成：**
-- ✅ 检查 Python 3.10+
-- ✅ 创建虚拟环境
-- ✅ 安装依赖（camoufox + curl_cffi）
-- ✅ 生成配置文件
-
-<details>
-<summary>💡 遇到问题？查看详细部署指南</summary>
-
-查看 [README_DEPLOY.md](README_DEPLOY.md) 了解：
-- 完整部署流程
-- 常见问题解决方案
-- 手动部署方法
-- 故障排除技巧
-
-</details>
+- ✅ 检查 Python 版本（要求 3.10+）
+- ✅ 创建独立虚拟环境（`.venv/`）
+- ✅ 自动安装所有依赖
+- ✅ 首次运行时生成配置文件
 
 ---
 
-### ⚙️ 配置邮箱（重要！）
+### 💻 方式二：源码部署（推荐开发者）
 
-首次运行会自动生成 `config.json`，请编辑配置：
+如果你想完全掌控项目环境，可以采用源码部署方式。
+
+#### 1️⃣ 克隆仓库
 
 ```bash
-nano config.json  # Linux / macOS
-notepad config.json  # Windows
+git clone https://github.com/YOUR_USERNAME/Grok4Free.git
+cd Grok4Free
 ```
+
+#### 2️⃣ 创建 Python 虚拟环境
+
+**Linux / macOS:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows (CMD):**
+```cmd
+python -m venv .venv
+.venv\Scripts\activate.bat
+```
+
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+#### 3️⃣ 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+> ⚠️ **注意：** 首次安装时会下载 GeoIP 数据库（约数百 MB），请确保网络稳定。
+
+#### 4️⃣ 准备配置文件
+
+```bash
+# 复制配置模板
+cp config.example.json config.json
+
+# 编辑配置文件（填入你的 API Key 和代理）
+nano config.json           # Linux / macOS
+notepad config.json        # Windows
+```
+
+#### 5️⃣ 启动程序
+
+**GUI 模式：**
+```bash
+python run.py
+```
+
+**CLI 批量注册：**
+```bash
+# MoEmail 模式
+python run.py register -n 10 -c 3
+
+# 微软邮箱模式
+python run.py register -m msgraph -c 2
+
+# 子邮箱模式
+python run.py register -m submailbox -c 2
+
+# 无头模式（后台运行）
+python run.py register -n 5 --headless
+```
+
+---
+
+### 📚 完整部署指南
+
+如果你想了解更多部署细节、常见问题解决方案和故障排除技巧，请查看：
+
+👉 **[README_DEPLOY.md](README_DEPLOY.md)**
+
+该文档包含：
+- ✅ 一键启动脚本原理详解
+- ✅ 源码部署最佳实践
+- ✅ 虚拟环境隔离说明
+- ✅ GeoIP 数据库配置
+- ✅ 常见问题 FAQ
+- ✅ Docker 容器化部署方案（可选）
+
+---
+
+### ⚙️ 配置邮箱
+
+无论选择哪种部署方式，都需要配置 `config.json`：
 
 **关键配置项：**
 | 配置项 | 作用 | 必填场景 |
@@ -90,7 +168,7 @@ notepad config.json  # Windows
 | `moemail_api_key` | MoEmail API Key | moemail 模式 |
 | `proxy` / `proxies` | 代理服务器配置 | 推荐配置 |
 
-详细配置说明请参考下方 **三种邮箱模式详解**。
+详见下方 **三种邮箱模式详解**。
 
 #### 三种邮箱模式详解：
 
