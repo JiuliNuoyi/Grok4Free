@@ -312,7 +312,7 @@ def human_type_otp(page, selector: str, text: str, state: dict, label="验证码
         return False
 
 
-def _accept_all_cookies(page, max_wait=8.0):
+def _accept_all_cookies(page, max_wait=15.0):
     """自动点击 OneTrust Cookie 同意按钮。
 
     OneTrust 弹窗通常延迟几秒才由 JS 注入渲染，因此这里在 max_wait 秒内
