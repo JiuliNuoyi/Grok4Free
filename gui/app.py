@@ -18,6 +18,9 @@ import threading
 import queue
 import os
 
+# 版本号
+__version__ = "v0.1.0"
+
 # 导入后端模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import load_config, save_config, get_moemail_api_base, get_moemail_api_key, \
@@ -39,7 +42,7 @@ class Grok4FreeGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Grok4Free - 自动注册工具")
+        self.root.title(f"Grok4Free v{__version__} - 自动注册工具")
         self.root.geometry("1000x750")
         self.root.minsize(800, 600)
         

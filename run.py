@@ -5,6 +5,8 @@
     python run.py                # 启动 GUI
     python run.py register -n 1  # 命令行单次注册
     python run.py register -n 3 --headless  # 批量注册 3 个
+
+版本：v0.1.0
 """
 
 import argparse
@@ -12,14 +14,14 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Grok4Free - Grok 账号自动注册工具")
+    parser = argparse.ArgumentParser(description="Grok4Free v0.1.0 - Grok 账号自动注册工具")
     
     # 默认命令是 gui
     if not sys.argv[1:] or sys.argv[1] in ("gui", "--help"):
         from gui.app import main as run_gui
         
         print("\n" + "=" * 60)
-        print("Grok4Free GUI 启动中...")
+        print("Grok4Free v0.1.0 GUI 启动中...")
         print("=" * 60)
         
         try:

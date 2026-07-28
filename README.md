@@ -14,6 +14,8 @@
 
 Grok4Free 是一个完全独立的 Grok 账号自动注册工具，实现了从**创建临时邮箱 → 填写注册表单 → 邮件验证码验证 → Turnstile 人机验证 → OAuth 设备授权 → 提取 refresh_token** 的全流程自动化。
 
+**版本：** v0.1.0
+
 核心特性包括：
 - 🔐 **三重邮箱支持**：MoEmail 自动创建 / 微软自有邮箱（Graph API） / 子邮箱模式（防串号设计）
 - 🛡️ **反检测机制**：Camoufox 反检测浏览器 + 拟人化鼠标轨迹 + 网络指纹一致性
@@ -283,48 +285,6 @@ Grok4Free/
 ## 🐛 常见问题
 
 ### Q1: "No such file: camoufox"
-**原因：** 未正确安装带 geoip 的版本
-
-```bash
-pip uninstall camoufox
-pip install "camoufox[geoip]"
-```
-
-### Q2: "MoEmail API 调用失败"
-**检查清单：**
-- `config.json` 中的 `moemail_api_base` 是否有末尾 `/`
-- `moemail_api_key` 是否有效且未过期
-- 服务器是否可以访问（`ping your-server.com`）
-
-### Q3: "Turnstile 超时"
-**解决方案：**
-- 更换到稳定性更好的代理节点
-- 使用 residential proxy（住宅代理）成功率更高
-- 调整 `--headless` 开关（部分情况下隐藏模式更稳定）
-
-### Q4: "微软邮箱取不到验证码"
-**诊断步骤：**
-1. 检查 `refresh_token` 是否失效（尝试手动刷新）
-2. 确认 `client_id` 是否具有 `Mail.Read` 权限
-3. 查看日志中的 tenant/scope 尝试记录
-4. 子邮箱模式需确认收件人地址过滤逻辑
-
-### Q5: "多并发导致封禁"
-**优化建议：**
-- 降低并发数至 1
-- 延长错峰间隔（修改 scheduler.py 的随机范围）
-- 使用不同的代理 IP 分散请求
-
----
-
-## 📜 开发日志
-
-- **v1.3 (2026-07-28):** 新增子邮箱模式，固定 GRAPH scope + 收件人过滤防串号
-- **v1.2 (2026-07-28):** 新增 MS Graph 微软邮箱模式，支持自备邮箱批量注册
-- **v1.1 (2026-07-28):** 多进程并发注册 + Turnstile 拟人化点击兜底
-- **v1.0 (2026-07-28):** 初始版本，完成从 grok-register 项目独立重构
-
----
 
 ## 🙏 致谢
 
