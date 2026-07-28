@@ -19,7 +19,7 @@ import queue
 import os
 
 # 版本号
-__version__ = "v0.1.0"
+__version__ = "v0.1.1"
 
 # 导入后端模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

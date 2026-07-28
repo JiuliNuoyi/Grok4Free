@@ -1,12 +1,12 @@
 #!/bin/bash
 # Grok4Free - Linux 启动脚本
-# 版本：v0.1.0
+# 版本：v0.1.1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 echo "=========================================="
-echo "Grok4Free v0.1.0 - Linux 启动器"
+echo "Grok4Free v0.1.1 - Linux 启动器"
 echo "=========================================="
 echo ""
 

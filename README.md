@@ -14,7 +14,7 @@
 
 Grok4Free 是一个完全独立的 Grok 账号自动注册工具，实现了从**创建临时邮箱 → 填写注册表单 → 邮件验证码验证 → Turnstile 人机验证 → OAuth 设备授权 → 提取 refresh_token** 的全流程自动化。
 
-**版本：** v0.1.0
+**版本：** v0.1.1
 
 <div align="center">
 
