@@ -272,32 +272,158 @@ def human_type_otp(page, selector: str, text: str, state: dict, label="验证码
         return False
 
 
+def _get_turnstile_token(page):
+    """读取 Turnstile 的 response token，没有则返回空串。"""
+    try:
+        token = page.evaluate(
+            """() => {
+                const el = document.querySelector('input[name="cf-turnstile-response"]');
+                return el ? (el.value || '') : '';
+            }"""
+        )
+        return str(token) if token else ""
+    except Exception:
+        return ""
+
+
+def _human_click_turnstile(page):
+    """检测并拟人化点击 Turnstile 的交互式 checkbox（偶发需要手点时的兜底）。
+
+    Turnstile 的 iframe 在 DOM 中 src 属性常为空（内容由 JS 注入），无法用
+    src/title 选择器匹配。改用 Playwright 的 page.frames 读取 frame 真实 URL，
+    定位到 challenges.cloudflare.com 的 frame，再对其左侧 checkbox 位置做
+    拟人化坐标点击（穿透 iframe）。找不到则退化到容器选择器。
+    返回 True 表示执行了点击动作。
+    """
+    # ---- 方案 1：通过 Playwright 的 frames 找真实 URL（DOM 里 src 属性可能为空）----
+    try:
+        for fr in page.frames:
+            furl = (fr.url or "").lower()
+            if "challenges.cloudflare.com" in furl or "turnstile" in furl:
+                try:
+                    handle = fr.frame_element()
+                    box = handle.bounding_box()
+                    if box and box["width"] > 10 and box["height"] > 10:
+                        print(f"🖱️ 通过 frame URL 定位到 Turnstile（{box['width']:.0f}x{box['height']:.0f}），拟人化点击...", flush=True)
+                        _human_mouse_move(page, box)
+                        cx = box["x"] + min(30, box["width"] * 0.12)
+                        cy = box["y"] + box["height"] / 2
+                        page.mouse.click(cx, cy, delay=random.randint(80, 180))
+                        print(f"✅ 已对 Turnstile 执行坐标点击 ({cx:.0f}, {cy:.0f})", flush=True)
+                        return True
+                except Exception as e:
+                    print(f"[DEBUG] frame 定位点击失败：{e}", flush=True)
+    except Exception as e:
+        print(f"[DEBUG] 遍历 frames 失败：{e}", flush=True)
+
+    # ---- 方案 2：找 Turnstile 容器/输入框，点击其所在区域 ----
+    # Turnstile 会在页面注入一个容器 div 和隐藏 input[name=cf-turnstile-response]，
+    # 交互式 checkbox 的 iframe 就挂在容器里。直接对容器区域做坐标点击即可穿透 iframe。
+    container_selectors = [
+        '.cf-turnstile',
+        'div[class*="turnstile"]',
+        'div[id*="turnstile"]',
+        'iframe[src=""]',          # 本例中 Turnstile iframe 的 src 为空
+        'iframe:not([title="onetrust-text-resize"])',
+    ]
+    for sel in container_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            box = loc.bounding_box()
+            if not box or box["width"] < 20 or box["height"] < 20:
+                continue
+            print(f"🖱️ 通过容器选择器（{sel}）定位到验证区，拟人化点击...", flush=True)
+            _human_mouse_move(page, box)
+            cx = box["x"] + min(30, box["width"] * 0.12)
+            cy = box["y"] + box["height"] / 2
+            page.mouse.click(cx, cy, delay=random.randint(80, 180))
+            print(f"✅ 已对验证区执行坐标点击 ({cx:.0f}, {cy:.0f})", flush=True)
+            return True
+        except Exception as e:
+            print(f"[DEBUG] 容器选择器 {sel} 出错：{e}", flush=True)
+            continue
+
+    # ---- 诊断：如果都没找到，打印当前所有 frame 的 URL 和 iframe 尺寸 ----
+    try:
+        frame_urls = [fr.url for fr in page.frames]
+        print(f"[DEBUG] 当前所有 frame URL：{frame_urls}", flush=True)
+        info = page.evaluate(
+            """() => Array.from(document.querySelectorAll('iframe')).map(f => {
+                const r = f.getBoundingClientRect();
+                return {src: f.src || '', title: f.title || '', w: r.width, h: r.height, x: r.x, y: r.y};
+            })"""
+        )
+        print(f"[DEBUG] 页面 iframe 列表：{info}", flush=True)
+    except Exception:
+        pass
+
+    print("[DEBUG] 未匹配到任何 Turnstile 验证框（可能尚未展开）", flush=True)
+    return False
+
+
+def _human_mouse_move(page, box):
+    """把鼠标以分段、带随机抖动的轨迹移动到目标区域中心，模拟真人。"""
+    try:
+        target_x = box["x"] + box["width"] / 2
+        target_y = box["y"] + box["height"] / 2
+        # 从一个随机起点分若干步移动过去
+        steps = random.randint(8, 16)
+        start_x = target_x - random.randint(120, 260)
+        start_y = target_y - random.randint(80, 200)
+        for i in range(1, steps + 1):
+            t = i / steps
+            # 缓动 + 轻微抖动
+            x = start_x + (target_x - start_x) * t + random.uniform(-3, 3)
+            y = start_y + (target_y - start_y) * t + random.uniform(-3, 3)
+            page.mouse.move(x, y)
+            time.sleep(random.uniform(0.01, 0.05))
+        time.sleep(random.uniform(0.15, 0.4))
+    except Exception:
+        pass
+
+
 def wait_for_turnstile(page, timeout=90, cancel_callback=None):
-    """等待 Cloudflare Turnstile 自动验证完成。"""
+    """等待 Cloudflare Turnstile 验证完成。
+
+    优先等待自动通过；若等待超过一定时间仍无 token，则判定为进入了
+    interactive 模式（偶发），检测 iframe 并拟人化点击 checkbox 作为兜底。
+    """
     print("⏳ 等待 Turnstile 自动验证...", flush=True)
     deadline = time.time() + timeout
+    start = time.time()
+    interactive_wait = 6.0   # 等待自动通过的秒数，超过则尝试手点
+    last_click = 0.0
+    click_cooldown = 8.0     # 两次点击之间的冷却，避免疯狂连点
+
     while time.time() < deadline:
         _check_cancel(cancel_callback)
+
+        # 1. 已拿到 token → 成功
+        token = _get_turnstile_token(page)
+        if token and len(token) > 20:
+            print(f"✅ Turnstile 已完成 (token 长度 {len(token)})", flush=True)
+            return True
+
+        # 2. 显示 "成功" 文本 → 成功
         try:
-            token = page.evaluate(
-                """() => {
-                    const el = document.querySelector('input[name="cf-turnstile-response"]');
-                    return el ? (el.value || '') : '';
-                }"""
-            )
-            if token and len(str(token)) > 20:
-                print(f"✅ Turnstile 已完成 (token 长度 {len(str(token))})", flush=True)
+            if page.locator("text=成功").count() > 0 and page.locator("text=成功").first.is_visible():
+                print("✅ Turnstile 显示 '成功！'", flush=True)
                 return True
         except Exception:
             pass
-        try:
-            if page.locator("text=成功").count() > 0:
-                if page.locator("text=成功").first.is_visible():
-                    print("✅ Turnstile 显示 '成功！'", flush=True)
-                    return True
-        except Exception:
-            pass
+
+        # 3. 等待超过 interactive_wait 仍无 token，且过了冷却期 → 尝试拟人化点击
+        elapsed = time.time() - start
+        if elapsed > interactive_wait and (time.time() - last_click) > click_cooldown:
+            if _human_click_turnstile(page):
+                last_click = time.time()
+                time.sleep(random.uniform(2.0, 3.0))  # 点后给 Cloudflare 后台验证时间
+                continue
+
         time.sleep(1.5)
+
     print("⚠️ Turnstile 等待超时", flush=True)
     return False
 
@@ -592,8 +718,13 @@ def _cancellable_sleep(seconds, cancel_callback):
         time.sleep(min(0.2, max(deadline - time.time(), 0)))
 
 
-def run_live(page, state, proxy="", cancel_callback=None):
-    """完整注册流程：创建邮箱 → 填邮箱 → 验证码 → 资料 → Turnstile → 完成注册 → OAuth → token。"""
+def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
+    """完整注册流程：创建邮箱 → 填邮箱 → 验证码 → 资料 → Turnstile → 完成注册 → OAuth → token。
+
+    save_to_file: True 时在本函数内直接把账号追加写入文件（CLI/单进程用）；
+                  False 时不写文件，只把账号信息放进返回值，由调用方统一写入
+                  （多进程模式下由主进程单点写入，避免文件竞争）。
+    """
     SIGNUP_URL = "https://accounts.x.ai/sign-up?redirect=grok-com"
 
     # ---- 步骤 0：创建邮箱 ----
@@ -794,12 +925,16 @@ def run_live(page, state, proxy="", cancel_callback=None):
         print(f"   refresh_token: {token.refresh_token[:40]}...", flush=True)
         
         # 保存账号
-        from .account_store import append_account
-        import os
-        out_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "accounts_<timestamp>.txt")
-        append_account(out_file, email, password, token.refresh_token)
-        print(f"\n💾 账号已追加保存到：{out_file}", flush=True)
-        print(f"   内容：{email}----{password}----{token.refresh_token[:20]}...", flush=True)
+        if save_to_file:
+            from .account_store import append_account
+            import os, time as _t
+            ts = _t.strftime("%Y%m%d")
+            out_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"accounts_{ts}.txt")
+            append_account(out_file, email, password, token.refresh_token)
+            print(f"\n💾 账号已追加保存到：{out_file}", flush=True)
+            print(f"   内容：{email}----{password}----{token.refresh_token[:20]}...", flush=True)
+        else:
+            print(f"\n💾 账号信息将由主进程统一保存", flush=True)
         
         return {
             "ok": True,

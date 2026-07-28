@@ -22,7 +22,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import load_config, save_config, get_moemail_api_base, get_moemail_api_key, \
                          get_moemail_domain, get_proxy
-from src.register import run_registration_flow
+from src.scheduler import RegistrationScheduler
 
 
 class Grok4FreeGUI:
@@ -46,6 +46,7 @@ class Grok4FreeGUI:
         self.running = False
         self.stop_requested = False
         self.ui_queue = queue.Queue()
+        self._scheduler = None
         
         # 统计数据
         self.success_count = 0
@@ -111,8 +112,8 @@ class Grok4FreeGUI:
         ttk.Button(btn_row, text="清空日志", command=self._clear_log, width=12).pack(side=tk.LEFT)
         
         # 统计栏
-        stats_var = tk.StringVar(value="就绪")
-        ttk.Label(control_frame, textvariable=stats_var, font=("Arial", 10, "bold"), 
+        self.stats_var = tk.StringVar(value="就绪")
+        ttk.Label(control_frame, textvariable=self.stats_var, font=("Arial", 10, "bold"),
                   foreground="#2196F3").pack(anchor=tk.W)
     
     def _create_config_widgets(self, parent):
@@ -149,6 +150,21 @@ class Grok4FreeGUI:
         self.count_var = tk.StringVar(value=str(max(count_val, 1)))
         count_entry = ttk.Spinbox(parent, from_=1, to=99, textvariable=self.count_var, width=12)
         count_entry.pack(pady=(0, 15))
+
+        # Concurrency（并发数，1-5）
+        ttk.Label(parent, text="并发数 (1-5):").pack(anchor=tk.W, pady=(10, 0))
+        conc_val = self.cfg.get("concurrency", 1)
+        try:
+            conc_val = max(1, min(int(conc_val), 5))
+        except (ValueError, TypeError):
+            conc_val = 1
+        self.concurrency_var = tk.StringVar(value=str(conc_val))
+        conc_entry = ttk.Spinbox(parent, from_=1, to=5, textvariable=self.concurrency_var, width=12)
+        conc_entry.pack(pady=(0, 2))
+        ttk.Label(parent, text="同时打开的浏览器窗口数",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 2))
+        ttk.Label(parent, text="推荐 1 并发，多并发注册容易风控",
+                  font=("Arial", 8), foreground="#f44336").pack(anchor=tk.W, pady=(0, 15))
         
         # Save Button
         ttk.Button(parent, text="保存配置", command=self._save_config).pack(pady=(0, 10))
@@ -213,7 +229,8 @@ class Grok4FreeGUI:
             cfg["moemail_api_key"] = self.api_key_var.get().strip()
             cfg["moemail_domain"] = self.domain_var.get().strip().lstrip("@")
             cfg["proxy"] = self.proxy_var.get().strip()
-            
+            cfg["concurrency"] = self._read_concurrency()
+
             save_config(cfg)
             
             # 更新本地引用
@@ -253,10 +270,17 @@ class Grok4FreeGUI:
         thread = threading.Thread(target=self._run_registration_thread, daemon=True)
         thread.start()
     
-    def _run_registration_thread(self):
-        """在后台线程中执行注册流程。"""
+    def _read_concurrency(self):
+        """读取并发数（1-5）。"""
         try:
-            # 更新配置（保存到磁盘，因为 register 会从磁盘重新读取代理等）
+            return max(1, min(int(self.concurrency_var.get().strip() or "1"), 5))
+        except (ValueError, TypeError):
+            return 1
+
+    def _run_registration_thread(self):
+        """在后台线程中通过多进程调度器执行注册流程。"""
+        try:
+            # 更新配置并保存到磁盘（worker 子进程会从磁盘读取代理等）
             cfg = load_config()
             cfg["moemail_api_base"] = self.api_base_var.get().strip().rstrip("/")
             cfg["moemail_api_key"] = self.api_key_var.get().strip()
@@ -268,49 +292,64 @@ class Grok4FreeGUI:
             except ValueError:
                 count = 1
             cfg["register_count"] = count
+            concurrency = self._read_concurrency()
+            cfg["concurrency"] = concurrency
             save_config(cfg)
-            
-            # 定义 observer
+
+            self._log(f"[*] 总数 {count}，并发 {concurrency}（错峰启动）")
+
+            # 统计
             last_stats = {"success": 0, "fail": 0}
-            
-            def observer(result):
-                last_stats["success"] += 1 if result.get("ok") else 0
-                last_stats["fail"] += 1 if not result.get("ok") else 0
-                total = last_stats["success"] + last_stats["fail"]
-                
-                self.ui_queue.put(("stats", last_stats["success"], last_stats["fail"], total))
-                
-                email = result.get("email", "unknown")
+
+            def result_callback(worker_id, result):
+                if result.get("cancelled"):
+                    return
                 if result.get("ok"):
-                    self._log(f"\n[✓] 第{last_stats['success']}个账号成功：{email}")
+                    last_stats["success"] += 1
+                    email = result.get("email", "unknown")
+                    self._log(f"\n[✓] 任务 #{worker_id} 成功：{email}")
                 else:
+                    last_stats["fail"] += 1
                     error = result.get("error", "未知错误")
-                    self._log(f"\n[×] 第{last_stats['fail']}个账号失败：{error}")
-            
-            # 调用注册流程
-            run_registration_flow(
-                log_callback=self._log,
-                headless=False,  # 显示浏览器
-                count=count,
-                cancel_callback=lambda: self.stop_requested,
-                observer=observer,
+                    self._log(f"\n[×] 任务 #{worker_id} 失败：{error}")
+                total = last_stats["success"] + last_stats["fail"]
+                self.ui_queue.put(("stats", last_stats["success"], last_stats["fail"], total))
+
+            def log_callback(worker_id, line):
+                self._log(line)
+
+            # 构建并运行调度器
+            self._scheduler = RegistrationScheduler(
+                config_dict=cfg,
+                total=count,
+                concurrency=concurrency,
+                headless=False,  # 有头模式
+                log_callback=log_callback,
+                result_callback=result_callback,
             )
-            
+            self._scheduler.run()
+
             self._log("\n[*] 注册流程执行完毕")
-            
+
         except Exception as e:
             self._log(f"\n[×] 异常：{e}")
             import traceback
             self._log(traceback.format_exc())
-        
+
         finally:
+            self._scheduler = None
             self.ui_queue.put(("running", False))
             self._log("[*] 任务结束")
-    
+
     def _stop_registration(self):
-        """请求停止注册。"""
+        """请求停止注册（通知所有 worker 进程）。"""
         self._log("\n[*] 请求停止注册...")
         self.stop_requested = True
+        if getattr(self, "_scheduler", None) is not None:
+            try:
+                self._scheduler.request_stop()
+            except Exception as e:
+                self._log(f"[!] 停止调度器失败：{e}")
 
 
 def main():

@@ -20,6 +20,7 @@ DEFAULT_CONFIG = {
     "moemail_expiry_ms": 3600000,
     "proxy": "",
     "register_count": 1,
+    "concurrency": 1,
 }
 
 
@@ -77,5 +78,12 @@ def get_proxy(config):
 def get_register_count(config):
     try:
         return max(int(config.get("register_count", 1) or 1), 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def get_concurrency(config):
+    try:
+        return max(1, min(int(config.get("concurrency", 1) or 1), 5))
     except (TypeError, ValueError):
         return 1
