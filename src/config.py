@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "moemail_domain": "",
     "moemail_expiry_ms": 3600000,
     "proxy": "",
+    "proxies": [],
     "register_count": 1,
     "concurrency": 1,
 }
@@ -73,6 +74,33 @@ def get_moemail_expiry_ms(config):
 
 def get_proxy(config):
     return str(config.get("proxy", "") or "").strip()
+
+
+def get_proxies(config):
+    """返回代理列表（去重、去空）。
+
+    优先读多行的 'proxies' 字段（列表或换行分隔字符串）；
+    若为空则回退到单个 'proxy' 字段。返回 list[str]，可能为空。
+    """
+    raw = config.get("proxies", None)
+    items = []
+    if isinstance(raw, list):
+        items = [str(x).strip() for x in raw]
+    elif isinstance(raw, str):
+        items = [ln.strip() for ln in raw.replace("\r", "\n").split("\n")]
+    # 回退到单个 proxy
+    if not any(items):
+        single = get_proxy(config)
+        if single:
+            items = [single]
+    # 去空、去重（保持顺序）
+    seen = set()
+    result = []
+    for it in items:
+        if it and it not in seen:
+            seen.add(it)
+            result.append(it)
+    return result
 
 
 def get_register_count(config):

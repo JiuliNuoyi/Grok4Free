@@ -30,19 +30,27 @@ except ImportError:
 # ============================================================================
 # 配置与邮箱服务
 # ===========================================================================
-def get_proxy_config():
-    """从 config.json 读取代理，解析成 Camoufox/Playwright 需要的格式。
-    
+def get_proxy_config(raw_override=None):
+    """把代理字符串解析成 Camoufox/Playwright 需要的格式。
+
+    Args:
+        raw_override: 显式指定的代理字符串（多进程模式下由调度器分配）。
+                      为 None 时回退到从 config.json 读取单个 proxy 字段。
+
     Returns:
         (playwright_proxy, raw_proxy_url): 
           - playwright_proxy: {"server", "username"?, "password"?} 或 None
           - raw_proxy_url: 原始代理字符串（供 OAuth/token 请求复用）
     """
     import urllib.parse
-    from .config import load_config, get_proxy
-    
-    cfg = load_config()
-    raw = str(get_proxy(cfg) or "").strip()
+
+    if raw_override is not None:
+        raw = str(raw_override or "").strip()
+    else:
+        from .config import load_config, get_proxy
+        cfg = load_config()
+        raw = str(get_proxy(cfg) or "").strip()
+
     if not raw:
         return None, ""
     if "://" not in raw:
@@ -198,8 +206,8 @@ def human_type(page, selector: str, text: str, state: dict, label="输入框") -
         for ch in text:
             page.keyboard.type(ch, delay=random.uniform(45, 140))
             if random.random() < 0.06:
-                time.sleep(random.uniform(0.25, 0.7))
-        time.sleep(random.uniform(0.2, 0.45))
+                time.sleep(random.uniform(0.08, 0.2))
+        time.sleep(random.uniform(0.05, 0.15))
         try:
             val = loc.input_value(timeout=2000)
         except Exception:
@@ -230,13 +238,13 @@ def human_type_otp(page, selector: str, text: str, state: dict, label="验证码
         else:
             loc.focus()
         
-        time.sleep(random.uniform(0.2, 0.4))
+        time.sleep(random.uniform(0.05, 0.15))
         
         # 逐字符输入
         for ch in text:
             page.keyboard.type(ch, delay=random.uniform(60, 140))
         
-        time.sleep(random.uniform(0.3, 0.6))
+        time.sleep(random.uniform(0.1, 0.25))
         
         # 尝试多种方法验证输入值
         val = ""
@@ -308,7 +316,7 @@ def _human_click_turnstile(page):
                         _human_mouse_move(page, box)
                         cx = box["x"] + min(30, box["width"] * 0.12)
                         cy = box["y"] + box["height"] / 2
-                        page.mouse.click(cx, cy, delay=random.randint(80, 180))
+                        page.mouse.click(cx, cy, delay=random.randint(50, 80))  # 加速：50-80ms
                         print(f"✅ 已对 Turnstile 执行坐标点击 ({cx:.0f}, {cy:.0f})", flush=True)
                         return True
                 except Exception as e:
@@ -335,10 +343,10 @@ def _human_click_turnstile(page):
             if not box or box["width"] < 20 or box["height"] < 20:
                 continue
             print(f"🖱️ 通过容器选择器（{sel}）定位到验证区，拟人化点击...", flush=True)
-            _human_mouse_move(page, box)
+            _human_mouse_move(page, box, accelerated=True)  # 加速模式
             cx = box["x"] + min(30, box["width"] * 0.12)
             cy = box["y"] + box["height"] / 2
-            page.mouse.click(cx, cy, delay=random.randint(80, 180))
+            page.mouse.click(cx, cy, delay=random.randint(50, 80))  # 加速：50-80ms
             print(f"✅ 已对验证区执行坐标点击 ({cx:.0f}, {cy:.0f})", flush=True)
             return True
         except Exception as e:
@@ -363,23 +371,33 @@ def _human_click_turnstile(page):
     return False
 
 
-def _human_mouse_move(page, box):
-    """把鼠标以分段、带随机抖动的轨迹移动到目标区域中心，模拟真人。"""
+def _human_mouse_move(page, box, accelerated=True):
+    """把鼠标以分段、带随机抖动的轨迹移动到目标区域中心，模拟真人。
+    
+    accelerated: True 时大幅减少步数和延迟，用于生产环境；False 时保持慢速拟人。
+    """
     try:
         target_x = box["x"] + box["width"] / 2
         target_y = box["y"] + box["height"] / 2
-        # 从一个随机起点分若干步移动过去
-        steps = random.randint(8, 16)
+        
+        if accelerated:
+            steps = random.randint(2, 4)           # 快：2-4 步（原 8-16）
+            step_delay = (0.003, 0.01)             # 快：每步 3-10ms（原 10-50ms）
+            post_delay = (0.05, 0.15)              # 快：结束后 50-150ms（原 150-400ms）
+        else:
+            steps = random.randint(8, 16)          # 慢：8-16 步
+            step_delay = (0.01, 0.05)
+            post_delay = (0.15, 0.4)
+        
         start_x = target_x - random.randint(120, 260)
         start_y = target_y - random.randint(80, 200)
         for i in range(1, steps + 1):
             t = i / steps
-            # 缓动 + 轻微抖动
             x = start_x + (target_x - start_x) * t + random.uniform(-3, 3)
             y = start_y + (target_y - start_y) * t + random.uniform(-3, 3)
             page.mouse.move(x, y)
-            time.sleep(random.uniform(0.01, 0.05))
-        time.sleep(random.uniform(0.15, 0.4))
+            time.sleep(random.uniform(*step_delay))
+        time.sleep(random.uniform(*post_delay))
     except Exception:
         pass
 
@@ -419,7 +437,7 @@ def wait_for_turnstile(page, timeout=90, cancel_callback=None):
         if elapsed > interactive_wait and (time.time() - last_click) > click_cooldown:
             if _human_click_turnstile(page):
                 last_click = time.time()
-                time.sleep(random.uniform(2.0, 3.0))  # 点后给 Cloudflare 后台验证时间
+                time.sleep(random.uniform(0.8, 1.5))  # 点后给 Cloudflare 后台验证时间
                 continue
 
         time.sleep(1.5)
@@ -440,7 +458,7 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
             print("👆 点击 '继续'...", flush=True)
             time.sleep(1.2)
             btn.click(delay=100)
-            time.sleep(3.0)
+            time.sleep(0.8)
             print("✅ 已点击 '继续'", flush=True)
         else:
             print("[DEBUG] 未找到 '继续' 按钮", flush=True)
@@ -468,30 +486,58 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
         print("🅱️ 检测到授权确认页（账号已登录）...", flush=True)
         _handle_authorize_buttons(page, cancel_callback=cancel_callback, timeout=timeout)
         print("✅ OAuth 授权登录执行完毕（免密授权）", flush=True)
-        time.sleep(2.0)
+        time.sleep(0.5)
         return True
 
     # 情况 A：未登录，走邮箱密码登录
-    try:
-        btn = page.locator('button[data-testid="continue-with-email"]').first
-        if btn.count() > 0:
-            print("👆 A：点击 '使用邮箱登录'...", flush=True)
-            time.sleep(1.2)
-            btn.click(delay=100)
-            time.sleep(3.0)  # 等待跳转到新页面
-            print("✅ 已点击 '使用邮箱登录'", flush=True)
-        else:
-            print("[DEBUG] 未找到 '使用邮箱登录' 按钮", flush=True)
-    except Exception as e:
-        print(f"[DEBUG] 点击使用邮箱登录失败：{e}", flush=True)
+    # 点击「使用邮箱登录」+ 重试（10 轮，每轮 5 秒），防止网速慢导致按钮未加载
+    email_login_clicked = False
+    for attempt in range(10):
+        _check_cancel(cancel_callback)
+        # 若邮箱输入框已经出现，说明已进入登录页，无需再点
+        try:
+            if page.locator('input[data-testid="email"]').count() > 0:
+                email_login_clicked = True
+                break
+        except Exception:
+            pass
+        try:
+            btn = page.locator('button[data-testid="continue-with-email"]').first
+            if btn.count() > 0 and btn.is_visible():
+                print("👆 A：点击 '使用邮箱登录'...", flush=True)
+                time.sleep(1.2)
+                btn.click(delay=100)
+                time.sleep(0.8)  # 等待跳转到新页面
+                print("✅ 已点击 '使用邮箱登录'", flush=True)
+                email_login_clicked = True
+                break
+        except Exception as e:
+            print(f"[DEBUG] 点击使用邮箱登录失败：{e}", flush=True)
+        print(f"[DEBUG] 第 {attempt + 1}/10 次未找到 '使用邮箱登录' 按钮，5 秒后重试...", flush=True)
+        time.sleep(5.0)
+
+    if not email_login_clicked:
+        print("[DEBUG] 多轮未找到 '使用邮箱登录' 按钮", flush=True)
 
     time.sleep(1.5)
     
     # 检查是否需要先点 "下一步" / "继续"
     _check_cancel(cancel_callback)
 
-    # 填写邮箱
-    if page.locator('input[data-testid="email"]').count() > 0:
+    # 填写邮箱（同样加重试，等待邮箱输入框出现）
+    email_input_found = False
+    for attempt in range(10):
+        _check_cancel(cancel_callback)
+        try:
+            if page.locator('input[data-testid="email"]').count() > 0:
+                email_input_found = True
+                break
+        except Exception:
+            pass
+        print(f"[DEBUG] 第 {attempt + 1}/10 次未找到邮箱输入框，5 秒后重试...", flush=True)
+        time.sleep(5.0)
+
+    if email_input_found:
         print("📧 填写登录邮箱...", flush=True)
         human_type(page, 'input[data-testid="email"]', email, state, "登录邮箱")
         time.sleep(0.8)
@@ -502,14 +548,14 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
             if submit_btn.count() > 0:
                 print("👆 点击 '下一步'...", flush=True)
                 submit_btn.click(delay=100)
-                time.sleep(2.0)  # 等待跳转到密码页
+                time.sleep(0.5)  # 等待跳转到密码页
                 print("✅ 已点击 '下一步'", flush=True)
             else:
                 submit_btn = page.locator('button[type="submit"]').filter(has_text="继续").first
                 if submit_btn.count() > 0:
                     print("👆 点击 '继续'...", flush=True)
                     submit_btn.click(delay=100)
-                    time.sleep(2.0)
+                    time.sleep(0.5)
                     print("✅ 已点击 '继续'", flush=True)
         except Exception:
             print("[DEBUG] 无'下一步'/ '继续'按钮，直接进入密码输入", flush=True)
@@ -521,16 +567,23 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
     _check_cancel(cancel_callback)
     time.sleep(1.0)
 
-    # 填写密码（尝试多种选择器）
+    # 填写密码（尝试多种选择器 + 重试，防止网速慢导致密码页未加载出来）
     password_selector = None
-    for sel in ['input[data-testid="password"]', 'input[type="password"]', 'input[name="password"]']:
-        try:
-            if page.locator(sel).count() > 0:
-                password_selector = sel
-                break
-        except Exception:
-            continue
-            
+    password_selectors = ['input[data-testid="password"]', 'input[type="password"]', 'input[name="password"]']
+    for attempt in range(5):  # 最多 5 次，每次间隔 2 秒 = 共 10 秒
+        _check_cancel(cancel_callback)
+        for sel in password_selectors:
+            try:
+                if page.locator(sel).count() > 0:
+                    password_selector = sel
+                    break
+            except Exception:
+                continue
+        if password_selector:
+            break
+        print(f"[DEBUG] 第 {attempt + 1}/5 次未找到密码输入框，2 秒后重试...", flush=True)
+        time.sleep(2.0)
+
     if password_selector:
         print(f"🔑 在 {password_selector} 填写登录密码...", flush=True)
         human_type(page, password_selector, password, state, "登录密码")
@@ -566,11 +619,11 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
         print(f"[DEBUG] 点击登录失败：{e}", flush=True)
         return False
 
-    time.sleep(3.0)
+    time.sleep(0.8)
 
     # 点击登录后会跳转到 oauth2/device 页面，需要额外等待页面完全加载
     print("[DEBUG] 等待 OAuth 授权页加载...", flush=True)
-    time.sleep(3.0)
+    time.sleep(0.8)
     
     # 检查授权确认页：登录后可能需要依次点击「继续」和「允许」
     # x.ai 的流程不固定，可能是：直接允许 / 继续→允许 / 继续→继续→允许
@@ -581,7 +634,7 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
     print("✅ OAuth 授权登录流程执行完毕", flush=True)
     
     # 等待一小段时间让授权生效
-    time.sleep(2.0)
+    time.sleep(0.5)
     
     return True
 
@@ -609,8 +662,8 @@ def _handle_authorize_buttons(page, cancel_callback=None, timeout=60):
         # 第一轮额外等待，确保登录后的新页面完全加载
         if first_round:
             first_round = False
-            print("[DEBUG] [第一轮] 额外等待 2 秒让页面加载", flush=True)
-            time.sleep(2.0)
+            print("[DEBUG] [第一轮] 额外等待 5 秒让页面加载", flush=True)
+            time.sleep(5.0)
 
         # 优先找「允许」（授权流程最后一步）
         try:
@@ -621,7 +674,7 @@ def _handle_authorize_buttons(page, cancel_callback=None, timeout=60):
                 allow_btn.click(delay=100)
                 print("✅ 已点击 '允许'！授权完成", flush=True)
                 clicked_allow = True
-                time.sleep(2.0)
+                time.sleep(0.5)
                 break
         except Exception as e:
             print(f"[DEBUG] 扫描 '允许' 按钮失败：{e}", flush=True)
@@ -646,12 +699,12 @@ def _handle_authorize_buttons(page, cancel_callback=None, timeout=60):
         # 本轮没找到任何授权按钮
         if not acted:
             empty_rounds += 1
-            # 连续 3 轮都没按钮，才检查是否已经跳转完成（放宽到 3 轮避免误判）
+            # 放宽重试次数：最多 10 轮（约 15 秒），适应网速慢的情况
             if empty_rounds >= 3:
                 if _check_authorization_complete(page):
                     print("✅ 未见授权按钮且页面已跳转，视为授权完成", flush=True)
                     break
-                if empty_rounds >= 5:
+                if empty_rounds >= 10:
                     print("[DEBUG] 连续多轮未找到授权按钮，停止等待", flush=True)
                     break
             time.sleep(1.5)
@@ -742,9 +795,9 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
 
     # ---- 步骤 1：打开注册页 ----
     print(f"\n🚀 步骤 1：打开注册页 {SIGNUP_URL} ...", flush=True)
-    page.goto(SIGNUP_URL, wait_until="networkidle", timeout=45_000)
+    page.goto(SIGNUP_URL, wait_until="domcontentloaded", timeout=45_000)
     print(f"✅ 当前 URL: {page.url}", flush=True)
-    time.sleep(3.0)
+    time.sleep(0.8)
 
     # ---- 步骤 2：点击「使用邮箱注册」 ----
     _check_cancel(cancel_callback)
@@ -761,7 +814,7 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
     except Exception as e:
         print(f"[DEBUG] 点击邮箱注册按钮失败：{e}", flush=True)
 
-    time.sleep(2.0)
+    time.sleep(0.5)
 
     # ---- 步骤 3：填写邮箱 ----
     _check_cancel(cancel_callback)
@@ -828,7 +881,7 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
         return {"ok": False, "email": email, "error": "未找到验证码输入框"}
     print(f"✅ 找到验证码输入框：{code_input}", flush=True)
     human_type_otp(page, code_input, clean_code, state, "验证码")
-    time.sleep(2.0)
+    time.sleep(0.5)
 
     # ---- 步骤 6：填写资料 ----
     _check_cancel(cancel_callback)
@@ -896,10 +949,45 @@ def run_live(page, state, proxy="", cancel_callback=None, save_to_file=True):
     print(f"✅ 设备码已生成，user_code: {session.user_code}", flush=True)
 
     # 打开授权链接
+    # 注意：注册成功后 x.ai 会让原页面自动跳转到 /account。若此时直接 goto 授权链接，
+    # 会与这个自动跳转撞车（Navigation interrupted）。Camoufox 是 persistent context
+    # 模式，不能开新标签页规避。因此策略为：
+    #   1) 先等原页的 /account 自动跳转稳定下来
+    #   2) 再 goto 授权链接，并加重试兜底（万一仍撞车，等一会重试，此时自动跳转已结束）
     _check_cancel(cancel_callback)
+
+    # 步骤 1：等待注册后的自动跳转稳定
+    print(f"\n⏳ 等待注册后页面跳转稳定...", flush=True)
+    try:
+        # 尽量等到跳去 /account（或任意稳定态）；等不到也不报错，继续往下走
+        page.wait_for_url("**/account**", timeout=8000)
+        print(f"✅ 已跳转到账户页：{page.url}", flush=True)
+    except Exception:
+        print(f"[DEBUG] 未检测到 /account 跳转（当前 {page.url}），继续", flush=True)
+    time.sleep(2.0)  # 额外缓冲，确保没有正在进行的导航
+
+    # 步骤 2：goto 授权链接 + 重试兜底
     print(f"\n🚀 打开授权链接...", flush=True)
-    page.goto(session.verification_uri_complete, wait_until="networkidle", timeout=45_000)
-    time.sleep(3.0)
+    goto_ok = False
+    for attempt in range(4):  # 最多 4 次
+        _check_cancel(cancel_callback)
+        try:
+            page.goto(session.verification_uri_complete, wait_until="domcontentloaded", timeout=45_000)
+            goto_ok = True
+            break
+        except Exception as e:
+            msg = str(e)
+            if "interrupted" in msg.lower() or "another navigation" in msg.lower():
+                print(f"[DEBUG] 第 {attempt + 1}/4 次 goto 被自动跳转打断，2 秒后重试...", flush=True)
+                time.sleep(2.0)
+                continue
+            # 其它错误（如代理断开）也重试一次
+            print(f"[DEBUG] 第 {attempt + 1}/4 次 goto 失败：{msg[:80]}，2 秒后重试...", flush=True)
+            time.sleep(2.0)
+    if not goto_ok:
+        print("⚠️ 多次尝试打开授权链接失败", flush=True)
+        return {"ok": False, "email": email, "error": "打开授权链接失败"}
+    time.sleep(0.8)
 
     # 执行授权登录
     login_ok = oauth_authorize_login(page, state, email, password, timeout=90, cancel_callback=cancel_callback)

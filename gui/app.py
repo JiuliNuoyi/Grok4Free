@@ -21,7 +21,7 @@ import os
 # 导入后端模块
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import load_config, save_config, get_moemail_api_base, get_moemail_api_key, \
-                         get_moemail_domain, get_proxy
+                         get_moemail_domain, get_proxy, get_proxies
 from src.scheduler import RegistrationScheduler
 
 
@@ -136,12 +136,17 @@ class Grok4FreeGUI:
         domain_entry = ttk.Entry(parent, textvariable=self.domain_var, width=30)
         domain_entry.pack(fill=tk.X, pady=(0, 15))
         
-        # Proxy
-        ttk.Label(parent, text="代理 (可留空):").pack(anchor=tk.W, pady=(10, 0))
-        self.proxy_var = tk.StringVar(value=get_proxy(self.cfg))
-        proxy_entry = ttk.Entry(parent, textvariable=self.proxy_var, width=30)
-        proxy_entry.pack(fill=tk.X, pady=(0, 2))
+        # Proxy（多行，一行一个；每个进程分配不同代理以规避风控）
+        ttk.Label(parent, text="代理 (可留空，一行一个):").pack(anchor=tk.W, pady=(10, 0))
+        self.proxy_text = tk.Text(parent, width=30, height=5, font=("Consolas", 9), wrap=tk.NONE)
+        self.proxy_text.pack(fill=tk.X, pady=(0, 2))
+        # 载入已有代理（优先多行 proxies，回退单个 proxy）
+        _init_proxies = get_proxies(self.cfg)
+        if _init_proxies:
+            self.proxy_text.insert("1.0", "\n".join(_init_proxies))
         ttk.Label(parent, text="格式: http://user:pass@host:port",
+                  font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 1))
+        ttk.Label(parent, text="多个代理时每进程分配不同代理，规避风控",
                   font=("Arial", 8), foreground="#888888").pack(anchor=tk.W, pady=(0, 15))
         
         # Register Count
@@ -228,7 +233,9 @@ class Grok4FreeGUI:
             cfg["moemail_api_base"] = self.api_base_var.get().strip().rstrip("/")
             cfg["moemail_api_key"] = self.api_key_var.get().strip()
             cfg["moemail_domain"] = self.domain_var.get().strip().lstrip("@")
-            cfg["proxy"] = self.proxy_var.get().strip()
+            proxies = self._read_proxies()
+            cfg["proxies"] = proxies
+            cfg["proxy"] = proxies[0] if proxies else ""  # 兼容单代理字段
             cfg["concurrency"] = self._read_concurrency()
 
             save_config(cfg)
@@ -277,6 +284,18 @@ class Grok4FreeGUI:
         except (ValueError, TypeError):
             return 1
 
+    def _read_proxies(self):
+        """从多行文本框读取代理列表（去空、去重、保持顺序）。"""
+        raw = self.proxy_text.get("1.0", tk.END)
+        seen = set()
+        result = []
+        for line in raw.replace("\r", "\n").split("\n"):
+            item = line.strip()
+            if item and item not in seen:
+                seen.add(item)
+                result.append(item)
+        return result
+
     def _run_registration_thread(self):
         """在后台线程中通过多进程调度器执行注册流程。"""
         try:
@@ -285,7 +304,9 @@ class Grok4FreeGUI:
             cfg["moemail_api_base"] = self.api_base_var.get().strip().rstrip("/")
             cfg["moemail_api_key"] = self.api_key_var.get().strip()
             cfg["moemail_domain"] = self.domain_var.get().strip().lstrip("@")
-            cfg["proxy"] = self.proxy_var.get().strip()
+            proxies = self._read_proxies()
+            cfg["proxies"] = proxies
+            cfg["proxy"] = proxies[0] if proxies else ""  # 兼容单代理字段
             count_str = self.count_var.get().strip() or "1"
             try:
                 count = max(int(count_str), 1)

@@ -25,7 +25,7 @@ class RegistrationScheduler:
 
     def __init__(self, config_dict, total, concurrency, headless=False,
                  log_callback=None, result_callback=None,
-                 stagger_min=2.0, stagger_max=5.0):
+                 stagger_min=0.5, stagger_max=2.0):  # 加速：从 2-5s → 0.5-2s
         """
         Args:
             config_dict:     配置字典
@@ -45,6 +45,11 @@ class RegistrationScheduler:
         self.stagger_min = stagger_min
         self.stagger_max = stagger_max
 
+        # 代理池：从配置读取多代理列表（一进程一代理，规避风控）
+        from .config import get_proxies
+        self.proxy_pool = get_proxies(config_dict)
+        self._proxy_rr = 0  # 轮询指针
+
         self._ctx = mp.get_context("spawn")  # spawn：跨平台一致，避免 fork 带进 GUI 对象
         self.log_queue = self._ctx.Queue()
         self.result_queue = self._ctx.Queue()
@@ -53,6 +58,23 @@ class RegistrationScheduler:
         self.success_count = 0
         self.fail_count = 0
         self._out_file = None
+
+    def _assign_proxy(self):
+        """为一个即将启动的 worker 分配代理。
+
+        分配策略：
+        - 代理池为空 → 返回 None（直连）
+        - 代理数 >= 并发数 → 轮询分配，保证并发中的进程各不相同
+        - 代理数 < 并发数 → 随机分配（无法完全避免重复，尽量打散）
+        """
+        pool = self.proxy_pool
+        if not pool:
+            return None
+        if len(pool) >= self.concurrency:
+            proxy = pool[self._proxy_rr % len(pool)]
+            self._proxy_rr += 1
+            return proxy
+        return random.choice(pool)
 
     def _log(self, worker_id, line):
         if self.log_callback:
@@ -112,6 +134,15 @@ class RegistrationScheduler:
         active = {}               # worker_id -> Process
 
         self._log(0, f"[主进程] 🚀 开始批量注册：总数 {self.total}，并发 {self.concurrency}")
+        if self.proxy_pool:
+            n = len(self.proxy_pool)
+            if n >= self.concurrency:
+                self._log(0, f"[主进程] 🌐 代理池 {n} 个，采用轮询分配（并发内各不相同）")
+            else:
+                self._log(0, f"[主进程] 🌐 代理池 {n} 个 < 并发 {self.concurrency}，"
+                             f"采用随机分配（部分进程可能共用代理）")
+        else:
+            self._log(0, "[主进程] 🌐 未配置代理，所有进程直连")
 
         while done < self.total:
             # 若已请求停止，跳出启动循环
@@ -125,15 +156,27 @@ class RegistrationScheduler:
                 wid = next_id
                 next_id += 1
                 launched += 1
+                assigned_proxy = self._assign_proxy()
                 p = self._ctx.Process(
                     target=run_worker,
                     args=(wid, self.config_dict, self.log_queue,
-                          self.result_queue, self.stop_event, self.headless),
+                          self.result_queue, self.stop_event, self.headless,
+                          assigned_proxy),
                     daemon=True,
                 )
                 p.start()
                 active[wid] = p
-                self._log(0, f"[主进程] ▶️ 启动任务 #{wid}（活跃 {len(active)}/{self.concurrency}）")
+                proxy_note = ""
+                if assigned_proxy:
+                    # 只显示 host:port，避免把账号密码打到日志
+                    import urllib.parse as _up
+                    _raw = assigned_proxy if "://" in assigned_proxy else "http://" + assigned_proxy
+                    try:
+                        _h = _up.urlsplit(_raw)
+                        proxy_note = f"，代理 {_h.hostname}:{_h.port}" if _h.hostname else ""
+                    except Exception:
+                        proxy_note = ""
+                self._log(0, f"[主进程] ▶️ 启动任务 #{wid}（活跃 {len(active)}/{self.concurrency}）{proxy_note}")
 
                 # 错峰：启动下一个前随机等待（仍要转发日志）
                 if len(active) < self.concurrency and launched < self.total:

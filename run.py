@@ -32,7 +32,7 @@ def main():
     parser.add_argument("command", nargs="?", default=None, help="命令：register（注册）或 gui（默认）")
     reg_parser = parser.add_argument_group("register 选项")
     reg_parser.add_argument("-n", "--count", type=int, default=1, help="注册数量（默认 1）")
-    reg_parser.add_argument("-c", "--concurrency", type=int, default=1, help="并发进程数 1-5（默认 1）")
+    reg_parser.add_argument("-c", "--concurrency", type=int, default=1, help="并发进程数 1-5，错峰启动 (0.5-2s)（默认 1）")
     reg_parser.add_argument("--headless", action="store_true", help="无头模式（不显示浏览器）")
     
     args = parser.parse_args()

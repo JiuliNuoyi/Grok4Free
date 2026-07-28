@@ -4,5 +4,10 @@
     "moemail_domain": "example.com",
     "moemail_expiry_ms": 3600000,
     "proxy": "",
-    "register_count": 1
+    "proxies": [
+        "http://user:pass@ip1:port",
+        "http://user:pass@ip2:port"
+    ],
+    "register_count": 1,
+    "concurrency": 1
 }

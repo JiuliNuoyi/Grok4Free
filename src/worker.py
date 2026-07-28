@@ -63,19 +63,21 @@ def _make_cancel_callback(stop_event):
 
 
 def run_worker(worker_id, config_dict, log_queue, result_queue, stop_event,
-               headless=False):
+               headless=False, proxy_override=None):
     """单个注册任务的子进程入口。
 
     Args:
-        worker_id:    进程编号（用于日志前缀）
-        config_dict:  配置字典（保留参数，主进程已把配置写入共享 config.json）
-        log_queue:    日志队列，(kind, worker_id, payload)
-        result_queue: 结果队列，(kind, worker_id, payload)
-        stop_event:   停止信号
-        headless:     是否无头
+        worker_id:      进程编号（用于日志前缀）
+        config_dict:    配置字典（保留参数，主进程已把配置写入共享 config.json）
+        log_queue:      日志队列，(kind, worker_id, payload)
+        result_queue:   结果队列，(kind, worker_id, payload)
+        stop_event:     停止信号
+        headless:       是否无头
+        proxy_override: 调度器分配给本进程的代理字符串（多代理模式）。
+                        为 None 时回退读取 config.json 的单个代理。
     """
-    # 所有 worker 共用同一份 config.json（相同 moemail + 相同代理），
-    # 注册过程中配置只读，无写竞争。主进程在启动 worker 前已保存好配置。
+    # 所有 worker 共用同一份 config.json（相同 moemail）。代理由调度器
+    # 通过 proxy_override 单独分配给每个进程，从而实现"一进程一代理"规避风控。
 
     redirect = _QueueLogRedirect(worker_id, log_queue, sys.__stdout__)
 
@@ -95,7 +97,7 @@ def run_worker(worker_id, config_dict, log_queue, result_queue, stop_event,
                 result_queue.put(("result", worker_id, result))
                 return
 
-            pw_proxy, raw_proxy = get_proxy_config()
+            pw_proxy, raw_proxy = get_proxy_config(raw_override=proxy_override)
             if pw_proxy:
                 print(f"[*] 使用代理：{pw_proxy['server']}"
                       + ("（含账号密码认证）" if pw_proxy.get("username") else ""), flush=True)
