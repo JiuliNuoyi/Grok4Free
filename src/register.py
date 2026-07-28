@@ -312,33 +312,49 @@ def human_type_otp(page, selector: str, text: str, state: dict, label="验证码
         return False
 
 
-def _accept_all_cookies(page):
-    """自动点击 OneTrust Cookie 同意按钮（如果存在）。"""
-    try:
-        # 尝试点击"接受所有 Cookie"按钮
-        buttons = [
-            "#onetrust-accept-btn-handler",
-            "#onetrust-reject-all-sticky",
-            "[id*='onetrust']",
-            ".ot-sdk-btn-consent",
-        ]
+def _accept_all_cookies(page, max_wait=8.0):
+    """自动点击 OneTrust Cookie 同意按钮。
 
-        for selector in buttons:
+    OneTrust 弹窗通常延迟几秒才由 JS 注入渲染，因此这里在 max_wait 秒内
+    持续轮询检测（每 0.5s 一次），只要按钮出现且可见即点击。
+    """
+    # 首选"接受所有"，其次是其它可能的按钮
+    selectors = [
+        "#onetrust-accept-btn-handler",
+        "button#onetrust-accept-btn-handler",
+        "#accept-recommended-btn-handler",
+        ".onetrust-close-btn-handler",
+        ".ot-sdk-btn-consent",
+    ]
+
+    deadline = time.time() + max_wait
+    printed_wait = False
+    while time.time() < deadline:
+        for selector in selectors:
             try:
-                page.wait_for_selector(selector, timeout=2000)
                 element = page.query_selector(selector)
-                if element:
-                    print(f"✅ 已点击 Cookie 同意按钮：{selector}", flush=True)
-                    element.click(timeout=3000)
+                if element and element.is_visible():
+                    try:
+                        element.click(timeout=3000)
+                    except Exception:
+                        # 兜底：用 JS 直接点击
+                        page.evaluate(
+                            "(sel) => { const el = document.querySelector(sel); if (el) el.click(); }",
+                            selector,
+                        )
+                    print(f"🍪 已点击 Cookie 同意按钮：{selector}", flush=True)
+                    time.sleep(0.5)
                     return True
             except Exception:
                 continue
 
-        # 如果没有找到，返回 None 表示无需处理
-        return None
-    except Exception as e:
-        print(f"⚠️ Cookie 同意检查失败（忽略）: {e}", flush=True)
-        return None
+        if not printed_wait:
+            print("🍪 等待 Cookie 弹窗出现...", flush=True)
+            printed_wait = True
+        time.sleep(0.5)
+
+    # 超时仍未出现，可能本次没有弹窗
+    return None
 
 
 def _get_turnstile_token(page):
@@ -655,9 +671,9 @@ def oauth_authorize_login(page, state, email, password, timeout=90, cancel_callb
     time.sleep(1.0)
 
     # 等待 Turnstile
-    # 先点击 Cookie 同意按钮（如果存在）
-    _accept_all_cookies(page)
-    
+    # 兜底：OAuth 授权页偶尔也会弹 Cookie（此处等待较短，通常已接受过）
+    _accept_all_cookies(page, max_wait=3.0)
+
     print("🛡️ 等待 Turnstile 验证...", flush=True)
     wait_for_turnstile(page, timeout=timeout, cancel_callback=cancel_callback)
 
